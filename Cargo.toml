@@ -1,0 +1,9 @@
+[package]
+name = "praborrow-lease"
+version.workspace = true
+edition.workspace = true
+description = "Lease consensus logic (Raft/Paxos) for the PraBorrow framework. Manages distributed agreement on Sovereign lease validity."
+
+[dependencies]
+praborrow-core = { path = "../praborrow-core", version = "0.2.0" }
+serde = { version = "1.0", features = ["derive"] }
