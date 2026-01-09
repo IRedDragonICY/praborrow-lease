@@ -8,5 +8,11 @@ repository.workspace = true
 description = "Lease consensus logic (Raft/Paxos). Manages distributed agreement on Sovereign lease validity."
 
 [dependencies]
-praborrow-core = { path = "../praborrow-core", version = "0.3.0" }
+praborrow-core = { path = "../praborrow-core", version = "0.4.0" }
 serde = { version = "1.0", features = ["derive"] }
+async-trait = "0.1"
+
+[features]
+default = ["std"]
+std = []
+net = ["std"]

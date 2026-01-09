@@ -1,4 +1,6 @@
 use serde::{Serialize, Deserialize};
+use crate::network::ConsensusNetwork;
+use std::boxed::Box;
 
 pub type Term = u64;
 pub type NodeId = u128;
@@ -30,10 +32,13 @@ pub struct RaftNode<T> {
     // Node State
     pub role: RaftRole,
     pub id: NodeId,
+    
+    // Networking
+    pub network: Box<dyn ConsensusNetwork>,
 }
 
 impl<T> RaftNode<T> {
-    pub fn new(id: NodeId) -> Self {
+    pub fn new(id: NodeId, network: Box<dyn ConsensusNetwork>) -> Self {
         Self {
             current_term: 0,
             voted_for: None,
@@ -42,15 +47,21 @@ impl<T> RaftNode<T> {
             last_applied: 0,
             role: RaftRole::Follower,
             id,
+            network,
         }
     }
 
     /// Transition to Candidate and start election.
-    pub fn start_election(&mut self) {
+    pub async fn start_election(&mut self) {
         self.current_term += 1;
         self.role = RaftRole::Candidate;
         self.voted_for = Some(self.id);
-        // In a real impl, we would reset election timer and broadcast RequestVote here.
+        
+        // Broadcast RequestVote
+        if let Err(e) = self.network.broadcast_vote_request(self.current_term, self.id).await {
+            // In a real system, we'd log this error
+            let _ = e; 
+        }
     }
 
     /// Handle RequestVote RPC.
