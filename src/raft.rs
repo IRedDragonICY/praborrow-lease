@@ -65,7 +65,7 @@ impl<T> RaftNode<T> {
             return false;
         }
 
-        if (self.voted_for.is_none() || self.voted_for == Some(candidate_id)) 
+        if self.voted_for.is_none() || self.voted_for == Some(candidate_id)
            // && Candidate's log is at least as up-to-date as receiver's log (simplified)
         {
             self.voted_for = Some(candidate_id);
