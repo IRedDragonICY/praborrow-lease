@@ -2,6 +2,7 @@ use crate::network::ConsensusNetwork;
 use crate::raft::{NodeId, Term, RaftStorage};
 use async_trait::async_trait;
 use std::boxed::Box;
+use serde::{Serialize, de::DeserializeOwned};
 
 /// Types of consensus algorithms supported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +47,18 @@ pub enum ConsensusError {
     NotLeader,
     #[error("Term mismatch")]
     TermMismatch,
+    /// Snapshot operation failed
+    #[error("Snapshot error: {0}")]
+    SnapshotError(String),
+    /// Log compaction failed
+    #[error("Compaction error: {0}")]
+    CompactionError(String),
+    /// Data integrity check failed
+    #[error("Integrity check failed: {0}")]
+    IntegrityError(String),
+    /// Log index is out of bounds
+    #[error("Index out of bounds: requested {requested}, available {available}")]
+    IndexOutOfBounds { requested: u64, available: u64 },
 }
 
 /// Factory for creating consensus engines.
@@ -66,7 +79,7 @@ impl ConsensusFactory {
     /// # Returns
     ///
     /// A boxed consensus engine, or an error if the strategy is not implemented.
-    pub fn create_engine<T: Clone + Send + Sync + 'static>(
+    pub fn create_engine<T: Clone + Send + Sync + Serialize + DeserializeOwned + 'static>(
         strategy: ConsensusStrategy,
         id: NodeId,
         network: Box<dyn ConsensusNetwork>,
@@ -99,7 +112,7 @@ struct RaftEngineAdapter<T> {
     node: crate::raft::RaftNode<T>,
 }
 
-impl<T: Clone + Send + 'static> RaftEngineAdapter<T> {
+impl<T: Clone + Send + Serialize + DeserializeOwned + 'static> RaftEngineAdapter<T> {
     fn new(
         id: NodeId,
         network: Box<dyn ConsensusNetwork>,
@@ -112,7 +125,7 @@ impl<T: Clone + Send + 'static> RaftEngineAdapter<T> {
 }
 
 #[async_trait]
-impl<T: Clone + Send + Sync + 'static> ConsensusEngine<T> for RaftEngineAdapter<T> {
+impl<T: Clone + Send + Sync + Serialize + DeserializeOwned + 'static> ConsensusEngine<T> for RaftEngineAdapter<T> {
     async fn run(&mut self) -> Result<(), ConsensusError> {
         tracing::info!(
             node_id = self.node.id,

@@ -17,6 +17,7 @@ tokio = { workspace = true, optional = true }
 thiserror = { workspace = true }
 sled = { workspace = true }
 bincode = { workspace = true }
+crc32fast = "1.5"
 
 [features]
 default = ["std"]
