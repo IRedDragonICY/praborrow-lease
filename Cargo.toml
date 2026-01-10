@@ -18,13 +18,32 @@ thiserror = { workspace = true }
 sled = { workspace = true }
 bincode = { workspace = true }
 crc32fast = "1.5"
+rand = { workspace = true }
+
+# gRPC (optional)
+tonic = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
+
+# TLS (optional)
+rustls = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+
+# Observability (optional)
+prometheus = { workspace = true, optional = true }
 
 [features]
 default = ["std"]
 std = ["tokio"]
 net = ["std"]
 tokio = ["dep:tokio"]
+grpc = ["std", "tonic", "prost"]
+tls = ["grpc", "rustls", "tokio-rustls"]
+observability = ["prometheus"]
+full = ["grpc", "tls", "observability"]
 
 [dev-dependencies]
 tokio = { workspace = true }
 futures = { workspace = true }
+
+[build-dependencies]
+tonic-build = { version = "0.13", optional = true }
