@@ -95,13 +95,9 @@ impl StateMachine for NoOpStateMachine {
     type Output = ();
     type SnapshotData = ();
 
-    fn apply(&mut self, _command: Self::Command) -> Self::Output {
+    fn apply(&mut self, _command: Self::Command) -> Self::Output {}
 
-    }
-
-    fn snapshot(&self) -> Self::SnapshotData {
-
-    }
+    fn snapshot(&self) -> Self::SnapshotData {}
 
     fn restore(&mut self, _snapshot: Self::SnapshotData) {
         // No state to restore

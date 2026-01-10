@@ -397,9 +397,7 @@ impl<T: Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + '
 
     async fn respond(&self, to: NodeId, message: RaftMessage<T>) -> Result<(), NetworkError> {
         let outboxes = self.outboxes.read().await;
-        let sender = outboxes
-            .get(&to)
-            .ok_or(NetworkError::PeerNotFound(to))?;
+        let sender = outboxes.get(&to).ok_or(NetworkError::PeerNotFound(to))?;
 
         sender
             .send(message)
