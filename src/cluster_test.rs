@@ -3,16 +3,16 @@
 //! Tests multi-node cluster behavior including leader election, log replication,
 //! and failure handling.
 
-use crate::engine::{ConsensusEngine, RaftConfig, RaftEngine};
-use crate::network::{InMemoryNetwork, PeerInfo, RaftMessage, RaftNetwork};
-use crate::raft::{InMemoryStorage, LogEntry, NodeId, RaftStorage, Term};
-use crate::state_machine::{KeyValueStateMachine, KvCommand, ReplicatedStateMachine, StateMachine};
+use crate::engine::RaftConfig;
+use crate::network::RaftMessage;
+use crate::raft::{InMemoryStorage, LogEntry, NodeId, RaftStorage};
+use crate::state_machine::{KeyValueStateMachine, KvCommand, ReplicatedStateMachine};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::{RwLock, mpsc};
 
 /// Test harness for a Raft cluster.
+#[allow(dead_code)]
 pub struct TestCluster<
     T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
 > {
@@ -20,12 +20,14 @@ pub struct TestCluster<
     network: TestNetwork<T>,
 }
 
+#[allow(dead_code)]
 struct TestNode<T: Clone + Send + Sync + 'static> {
     id: NodeId,
     inbox_tx: mpsc::Sender<RaftMessage<T>>,
     inbox_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<RaftMessage<T>>>>,
 }
 
+#[allow(dead_code)]
 struct TestNetwork<T: Clone + Send + Sync + 'static> {
     channels: Arc<RwLock<HashMap<NodeId, mpsc::Sender<RaftMessage<T>>>>>,
 }
@@ -332,7 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_state_machine_apply() {
-        let mut sm = KeyValueStateMachine::new();
+        let sm = KeyValueStateMachine::new();
         let mut storage: InMemoryStorage<KvCommand> = InMemoryStorage::new();
 
         // Append commands to log
