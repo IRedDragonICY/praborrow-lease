@@ -1,9 +1,9 @@
-use praborrow_core::{Sovereign, DistributedBorrow, Lease, LeaseError};
+use praborrow_core::{DistributedBorrow, Lease, LeaseError, Sovereign};
 use std::time::Duration;
 
 /// Manages the consensus of leases for a specific resource.
 ///
-/// In Year 1, this acts as the "Local Leader". 
+/// In Year 1, this acts as the "Local Leader".
 /// In Year 5, this will participate in Raft/Paxos.
 pub struct LeaseManager<'a, T> {
     resource: &'a Sovereign<T>,
@@ -26,7 +26,6 @@ impl<'a, T> LeaseManager<'a, T> {
     /// Simulates a heartbeat failure (Split vote / Partition).
     ///
     /// For now, this just verifies if the lease is valid.
-
     pub fn heartbeat(&self) -> bool {
         // If we can access it domestically, there is no active lease (or it expired).
         // If we panic/fail access, there is a lease.
@@ -64,7 +63,7 @@ mod tests {
 
         let term = Duration::from_secs(1);
         let vote = manager.request_vote(101, term);
-        
+
         assert!(vote.is_ok());
         let lease = vote.unwrap();
         assert_eq!(lease.holder, 101);
@@ -72,7 +71,7 @@ mod tests {
         // Verify resource is now locked/foreign
         // We can't easily check "is_foreign" without a method, but we can try to vote again?
         // DistributedBorrow::try_hire returns Err if already leased.
-        
+
         let vote2 = manager.request_vote(102, term);
         assert!(vote2.is_err());
     }

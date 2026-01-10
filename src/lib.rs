@@ -28,11 +28,11 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-mod manager;
-pub mod raft;
-pub mod network;
 pub mod engine;
+mod manager;
 pub mod metrics;
+pub mod network;
+pub mod raft;
 pub mod state_machine;
 
 #[cfg(feature = "grpc")]
@@ -49,14 +49,13 @@ pub use manager::LeaseManager;
 
 // Engine exports
 pub use engine::{
-    ConsensusEngine, ConsensusError, ConsensusFactory, ConsensusStrategy, 
-    RaftConfig, RaftEngine,
+    ConsensusEngine, ConsensusError, ConsensusFactory, ConsensusStrategy, RaftConfig, RaftEngine,
 };
 
 // Network exports
 pub use network::{
-    RaftNetwork, RaftMessage, NetworkError, NetworkConfig, PeerInfo, InMemoryNetwork,
-    ConsensusNetwork, Packet,
+    ConsensusNetwork, InMemoryNetwork, NetworkConfig, NetworkError, Packet, PeerInfo, RaftMessage,
+    RaftNetwork,
 };
 
 // Metrics exports
@@ -64,21 +63,21 @@ pub use metrics::{RaftMetrics, RaftRoleMetric};
 
 // Raft core exports
 pub use raft::{
-    RaftNode, RaftRole, RaftStorage, InMemoryStorage, FileStorage,
-    Term, NodeId, LogIndex, LogEntry, LogInfo, Snapshot, StorageStats,
+    FileStorage, InMemoryStorage, LogEntry, LogIndex, LogInfo, NodeId, RaftNode, RaftRole,
+    RaftStorage, Snapshot, StorageStats, Term,
 };
 
 // State machine exports
 pub use state_machine::{
-    StateMachine, NoOpStateMachine, KeyValueStateMachine, KvCommand, KvOutput,
-    ReplicatedStateMachine,
+    KeyValueStateMachine, KvCommand, KvOutput, NoOpStateMachine, ReplicatedStateMachine,
+    StateMachine,
 };
 
 // gRPC exports (when feature enabled)
 #[cfg(feature = "grpc")]
 pub use grpc::{
-    GrpcTransport, GrpcConfig, TlsConfig, CircuitBreaker, CircuitBreakerConfig,
-    CircuitState, ConnectionPool, start_grpc_server,
+    CircuitBreaker, CircuitBreakerConfig, CircuitState, ConnectionPool, GrpcConfig, GrpcTransport,
+    TlsConfig, start_grpc_server,
 };
 
 // ============================================================================
@@ -88,10 +87,8 @@ pub use grpc::{
 /// Convenient imports for common use cases.
 pub mod prelude {
     pub use crate::{
-        ConsensusEngine, ConsensusError, RaftConfig, RaftEngine,
-        RaftNetwork, RaftMessage, InMemoryNetwork,
-        RaftStorage, InMemoryStorage, FileStorage,
-        StateMachine, KeyValueStateMachine, ReplicatedStateMachine,
-        Term, NodeId, LogIndex, LogEntry,
+        ConsensusEngine, ConsensusError, FileStorage, InMemoryNetwork, InMemoryStorage,
+        KeyValueStateMachine, LogEntry, LogIndex, NodeId, RaftConfig, RaftEngine, RaftMessage,
+        RaftNetwork, RaftStorage, ReplicatedStateMachine, StateMachine, Term,
     };
 }

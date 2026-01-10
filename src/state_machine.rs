@@ -56,30 +56,30 @@ use std::fmt::Debug;
 pub trait StateMachine: Send + Sync {
     /// The command type that modifies the state machine.
     type Command: Clone + Send + Sync + Serialize + DeserializeOwned + Debug;
-    
+
     /// The output produced when applying a command.
     type Output: Clone + Send + Sync + Serialize + DeserializeOwned + Debug;
-    
+
     /// The snapshot data format.
     type SnapshotData: Clone + Send + Sync + Serialize + DeserializeOwned;
-    
+
     /// Applies a command to the state machine, returning the result.
     ///
     /// This method must be deterministic - the same command applied to the
     /// same state must always produce the same result.
     fn apply(&mut self, command: Self::Command) -> Self::Output;
-    
+
     /// Creates a snapshot of the current state.
     ///
     /// This is used for log compaction. The snapshot must capture
     /// the complete state as of the last applied command.
     fn snapshot(&self) -> Self::SnapshotData;
-    
+
     /// Restores the state machine from a snapshot.
     ///
     /// Called when installing a snapshot from the leader.
     fn restore(&mut self, snapshot: Self::SnapshotData);
-    
+
     /// Returns the name of this state machine (for logging/metrics).
     fn name(&self) -> &str {
         std::any::type_name::<Self>()
@@ -94,19 +94,19 @@ impl StateMachine for NoOpStateMachine {
     type Command = Vec<u8>;
     type Output = ();
     type SnapshotData = ();
-    
+
     fn apply(&mut self, _command: Self::Command) -> Self::Output {
-        ()
+
     }
-    
+
     fn snapshot(&self) -> Self::SnapshotData {
-        ()
+
     }
-    
+
     fn restore(&mut self, _snapshot: Self::SnapshotData) {
         // No state to restore
     }
-    
+
     fn name(&self) -> &str {
         "NoOpStateMachine"
     }
@@ -130,15 +130,15 @@ impl KeyValueStateMachine {
             data: std::collections::HashMap::new(),
         }
     }
-    
+
     pub fn get(&self, key: &str) -> Option<&Vec<u8>> {
         self.data.get(key)
     }
-    
+
     pub fn len(&self) -> usize {
         self.data.len()
     }
-    
+
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
@@ -164,7 +164,7 @@ impl StateMachine for KeyValueStateMachine {
     type Command = KvCommand;
     type Output = KvOutput;
     type SnapshotData = std::collections::HashMap<String, Vec<u8>>;
-    
+
     fn apply(&mut self, command: Self::Command) -> Self::Output {
         match command {
             KvCommand::Set { key, value } => {
@@ -177,15 +177,15 @@ impl StateMachine for KeyValueStateMachine {
             }
         }
     }
-    
+
     fn snapshot(&self) -> Self::SnapshotData {
         self.data.clone()
     }
-    
+
     fn restore(&mut self, snapshot: Self::SnapshotData) {
         self.data = snapshot;
     }
-    
+
     fn name(&self) -> &str {
         "KeyValueStateMachine"
     }
@@ -195,8 +195,8 @@ impl StateMachine for KeyValueStateMachine {
 // REPLICATED STATE MACHINE
 // ============================================================================
 
-use crate::raft::{LogIndex, RaftStorage, LogEntry};
 use crate::engine::ConsensusError;
+use crate::raft::{LogIndex, RaftStorage};
 
 /// A replicated state machine that applies committed log entries.
 pub struct ReplicatedStateMachine<SM: StateMachine, S: RaftStorage<SM::Command>> {
@@ -221,31 +221,34 @@ where
             last_applied: 0,
         }
     }
-    
+
     /// Returns a reference to the underlying state machine.
     pub fn state_machine(&self) -> &SM {
         &self.state_machine
     }
-    
+
     /// Returns the last applied index.
     pub fn last_applied(&self) -> LogIndex {
         self.last_applied
     }
-    
+
     /// Applies all committed entries up to commit_index.
     ///
     /// Returns the outputs for each applied command.
-    pub fn apply_committed(&mut self, commit_index: LogIndex) -> Result<Vec<(LogIndex, SM::Output)>, ConsensusError> {
+    pub fn apply_committed(
+        &mut self,
+        commit_index: LogIndex,
+    ) -> Result<Vec<(LogIndex, SM::Output)>, ConsensusError> {
         let mut outputs = Vec::new();
-        
+
         while self.last_applied < commit_index {
             let next_index = self.last_applied + 1;
-            
+
             if let Some(entry) = self.storage.get_log_entry(next_index)? {
                 let output = self.state_machine.apply(entry.command);
                 outputs.push((next_index, output));
                 self.last_applied = next_index;
-                
+
                 tracing::debug!(
                     index = next_index,
                     sm = self.state_machine.name(),
@@ -256,20 +259,20 @@ where
                 break;
             }
         }
-        
+
         Ok(outputs)
     }
-    
+
     /// Creates a snapshot of the current state.
     pub fn create_snapshot(&self) -> SM::SnapshotData {
         self.state_machine.snapshot()
     }
-    
+
     /// Restores from a snapshot.
     pub fn restore_snapshot(&mut self, snapshot: SM::SnapshotData, last_included_index: LogIndex) {
         self.state_machine.restore(snapshot);
         self.last_applied = last_included_index;
-        
+
         tracing::info!(
             index = last_included_index,
             sm = self.state_machine.name(),
@@ -285,69 +288,69 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_noop_state_machine() {
         let mut sm = NoOpStateMachine;
         let output = sm.apply(vec![1, 2, 3]);
         assert_eq!(output, ());
-        
+
         let snapshot = sm.snapshot();
         sm.restore(snapshot);
     }
-    
+
     #[test]
     fn test_kv_state_machine_set() {
         let mut sm = KeyValueStateMachine::new();
-        
+
         let output = sm.apply(KvCommand::Set {
             key: "foo".to_string(),
             value: b"bar".to_vec(),
         });
-        
+
         assert!(matches!(output, KvOutput::Value(None)));
         assert_eq!(sm.get("foo"), Some(&b"bar".to_vec()));
     }
-    
+
     #[test]
     fn test_kv_state_machine_overwrite() {
         let mut sm = KeyValueStateMachine::new();
-        
+
         sm.apply(KvCommand::Set {
             key: "foo".to_string(),
             value: b"bar".to_vec(),
         });
-        
+
         let output = sm.apply(KvCommand::Set {
             key: "foo".to_string(),
             value: b"baz".to_vec(),
         });
-        
+
         assert!(matches!(output, KvOutput::Value(Some(_))));
         assert_eq!(sm.get("foo"), Some(&b"baz".to_vec()));
     }
-    
+
     #[test]
     fn test_kv_state_machine_delete() {
         let mut sm = KeyValueStateMachine::new();
-        
+
         sm.apply(KvCommand::Set {
             key: "foo".to_string(),
             value: b"bar".to_vec(),
         });
-        
+
         let output = sm.apply(KvCommand::Delete {
             key: "foo".to_string(),
         });
-        
+
         assert!(matches!(output, KvOutput::Value(Some(_))));
         assert!(sm.get("foo").is_none());
     }
-    
+
     #[test]
     fn test_kv_state_machine_snapshot() {
         let mut sm = KeyValueStateMachine::new();
-        
+
         sm.apply(KvCommand::Set {
             key: "a".to_string(),
             value: b"1".to_vec(),
@@ -356,14 +359,16 @@ mod tests {
             key: "b".to_string(),
             value: b"2".to_vec(),
         });
-        
+
         let snapshot = sm.snapshot();
         assert_eq!(snapshot.len(), 2);
-        
+
         // Modify state
-        sm.apply(KvCommand::Delete { key: "a".to_string() });
+        sm.apply(KvCommand::Delete {
+            key: "a".to_string(),
+        });
         assert_eq!(sm.len(), 1);
-        
+
         // Restore from snapshot
         sm.restore(snapshot);
         assert_eq!(sm.len(), 2);

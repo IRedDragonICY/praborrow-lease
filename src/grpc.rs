@@ -4,14 +4,14 @@
 
 #![cfg(feature = "grpc")]
 
-use crate::network::{RaftNetwork, RaftMessage, NetworkError, PeerInfo};
-use crate::raft::{Term, NodeId, LogIndex, LogEntry, Snapshot};
+use crate::network::{NetworkError, PeerInfo, RaftMessage, RaftNetwork};
+use crate::raft::{LogEntry, LogIndex, NodeId, Snapshot, Term};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock;
-use std::sync::atomic::{AtomicU32, AtomicU8, AtomicI64, Ordering};
 
 // Include generated protobuf code
 pub mod proto {
@@ -20,7 +20,10 @@ pub mod proto {
 
 use proto::raft_client::RaftClient;
 use proto::raft_server::{Raft, RaftServer};
-use tonic::{Request, Response, Status, transport::{Channel, Server, Endpoint}};
+use tonic::{
+    Request, Response, Status,
+    transport::{Channel, Endpoint, Server},
+};
 
 // ============================================================================
 // CONFIGURATION
@@ -137,7 +140,7 @@ impl CircuitBreaker {
             config,
         }
     }
-    
+
     pub fn state(&self) -> CircuitState {
         match self.state.load(Ordering::SeqCst) {
             0 => CircuitState::Closed,
@@ -145,7 +148,7 @@ impl CircuitBreaker {
             _ => CircuitState::HalfOpen,
         }
     }
-    
+
     /// Check if request is allowed.
     pub fn allow_request(&self) -> bool {
         match self.state() {
@@ -157,9 +160,10 @@ impl CircuitBreaker {
                     .unwrap()
                     .as_millis() as i64;
                 let last_failure = self.last_failure_time.load(Ordering::SeqCst);
-                
+
                 if now - last_failure > self.config.reset_timeout.as_millis() as i64 {
-                    self.state.store(CircuitState::HalfOpen as u8, Ordering::SeqCst);
+                    self.state
+                        .store(CircuitState::HalfOpen as u8, Ordering::SeqCst);
                     self.success_count.store(0, Ordering::SeqCst);
                     true
                 } else {
@@ -169,7 +173,7 @@ impl CircuitBreaker {
             CircuitState::HalfOpen => true,
         }
     }
-    
+
     /// Record a successful request.
     pub fn record_success(&self) {
         match self.state() {
@@ -179,7 +183,8 @@ impl CircuitBreaker {
             CircuitState::HalfOpen => {
                 let count = self.success_count.fetch_add(1, Ordering::SeqCst) + 1;
                 if count >= self.config.success_threshold {
-                    self.state.store(CircuitState::Closed as u8, Ordering::SeqCst);
+                    self.state
+                        .store(CircuitState::Closed as u8, Ordering::SeqCst);
                     self.failure_count.store(0, Ordering::SeqCst);
                     tracing::info!("Circuit breaker closed");
                 }
@@ -187,7 +192,7 @@ impl CircuitBreaker {
             CircuitState::Open => {}
         }
     }
-    
+
     /// Record a failed request.
     pub fn record_failure(&self) {
         let now = std::time::SystemTime::now()
@@ -195,7 +200,7 @@ impl CircuitBreaker {
             .unwrap()
             .as_millis() as i64;
         self.last_failure_time.store(now, Ordering::SeqCst);
-        
+
         match self.state() {
             CircuitState::Closed => {
                 let count = self.failure_count.fetch_add(1, Ordering::SeqCst) + 1;
@@ -236,43 +241,58 @@ impl ConnectionPool {
             config,
         }
     }
-    
+
     /// Gets or creates a connection to a peer.
-    pub async fn get_connection(&self, peer_id: NodeId, address: &str) -> Result<RaftClient<Channel>, NetworkError> {
+    pub async fn get_connection(
+        &self,
+        peer_id: NodeId,
+        address: &str,
+    ) -> Result<RaftClient<Channel>, NetworkError> {
         // Check if connection exists
         {
             let connections = self.connections.read().await;
             if let Some(conn) = connections.get(&peer_id) {
                 if !conn.circuit_breaker.allow_request() {
-                    return Err(NetworkError::ConnectionFailed("Circuit breaker open".into()));
+                    return Err(NetworkError::ConnectionFailed(
+                        "Circuit breaker open".into(),
+                    ));
                 }
                 return Ok(conn.client.clone());
             }
         }
-        
+
         // Create new connection
         let endpoint = Endpoint::from_shared(format!("http://{}", address))
             .map_err(|e| NetworkError::ConnectionFailed(e.to_string()))?
             .connect_timeout(self.config.connect_timeout)
             .timeout(self.config.request_timeout);
-        
-        let channel = endpoint.connect().await
+
+        let channel = endpoint
+            .connect()
+            .await
             .map_err(|e| NetworkError::ConnectionFailed(e.to_string()))?;
-        
+
         let client = RaftClient::new(channel);
-        
+
         // Store connection
         let mut connections = self.connections.write().await;
-        connections.insert(peer_id, PeerConnection {
-            client: client.clone(),
-            circuit_breaker: CircuitBreaker::new(self.config.circuit_breaker.clone()),
-        });
-        
-        tracing::info!(peer_id = peer_id, address = address, "Created new gRPC connection");
-        
+        connections.insert(
+            peer_id,
+            PeerConnection {
+                client: client.clone(),
+                circuit_breaker: CircuitBreaker::new(self.config.circuit_breaker.clone()),
+            },
+        );
+
+        tracing::info!(
+            peer_id = peer_id,
+            address = address,
+            "Created new gRPC connection"
+        );
+
         Ok(client)
     }
-    
+
     /// Records success for a peer's circuit breaker.
     pub async fn record_success(&self, peer_id: NodeId) {
         let connections = self.connections.read().await;
@@ -280,7 +300,7 @@ impl ConnectionPool {
             conn.circuit_breaker.record_success();
         }
     }
-    
+
     /// Records failure for a peer's circuit breaker.
     pub async fn record_failure(&self, peer_id: NodeId) {
         let connections = self.connections.read().await;
@@ -305,11 +325,13 @@ pub struct GrpcTransport<T> {
     _phantom: std::marker::PhantomData<T>,
 }
 
-impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static> GrpcTransport<T> {
+impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static>
+    GrpcTransport<T>
+{
     /// Creates a new gRPC transport.
     pub fn new(node_id: NodeId, config: GrpcConfig) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(1000);
-        
+
         Self {
             node_id,
             peers: Arc::new(RwLock::new(HashMap::new())),
@@ -320,19 +342,25 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             _phantom: std::marker::PhantomData,
         }
     }
-    
+
     /// Returns the inbox sender for the gRPC server to use.
     pub fn inbox_sender(&self) -> tokio::sync::mpsc::Sender<RaftMessage<T>> {
         self.inbox_sender.clone()
     }
-    
+
     /// Sends a request with retry and exponential backoff.
-    async fn send_with_retry<F, R>(&self, peer_id: NodeId, mut operation: F) -> Result<R, NetworkError>
+    async fn send_with_retry<F, R>(
+        &self,
+        peer_id: NodeId,
+        mut operation: F,
+    ) -> Result<R, NetworkError>
     where
-        F: FnMut() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<R, NetworkError>> + Send>>,
+        F: FnMut() -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<R, NetworkError>> + Send>,
+        >,
     {
         let mut backoff = self.config.initial_backoff;
-        
+
         for attempt in 0..=self.config.max_retries {
             match operation().await {
                 Ok(result) => {
@@ -341,7 +369,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
                 }
                 Err(e) => {
                     self.pool.record_failure(peer_id).await;
-                    
+
                     if attempt < self.config.max_retries {
                         tracing::warn!(
                             peer_id = peer_id,
@@ -352,7 +380,9 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
                         );
                         tokio::time::sleep(backoff).await;
                         backoff = std::cmp::min(
-                            Duration::from_secs_f64(backoff.as_secs_f64() * self.config.backoff_multiplier),
+                            Duration::from_secs_f64(
+                                backoff.as_secs_f64() * self.config.backoff_multiplier,
+                            ),
                             self.config.max_backoff,
                         );
                     } else {
@@ -361,13 +391,15 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
                 }
             }
         }
-        
+
         unreachable!()
     }
 }
 
 #[async_trait]
-impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static> RaftNetwork<T> for GrpcTransport<T> {
+impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static>
+    RaftNetwork<T> for GrpcTransport<T>
+{
     async fn send_request_vote(
         &self,
         peer_id: NodeId,
@@ -377,11 +409,12 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
         last_log_term: Term,
     ) -> Result<Option<RaftMessage<T>>, NetworkError> {
         let peers = self.peers.read().await;
-        let peer = peers.get(&peer_id)
+        let peer = peers
+            .get(&peer_id)
             .ok_or_else(|| NetworkError::PeerNotFound(peer_id))?;
         let address = peer.address.clone();
         drop(peers);
-        
+
         let pool = self.pool.clone();
         let request = proto::RequestVoteRequest {
             term,
@@ -389,27 +422,31 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             last_log_index,
             last_log_term,
         };
-        
-        let response = self.send_with_retry(peer_id, || {
-            let pool = pool.clone();
-            let address = address.clone();
-            let request = request.clone();
-            
-            Box::pin(async move {
-                let mut client = pool.get_connection(peer_id, &address).await?;
-                let response = client.request_vote(Request::new(request)).await
-                    .map_err(|e| NetworkError::TransportError(e.to_string()))?;
-                Ok(response.into_inner())
+
+        let response = self
+            .send_with_retry(peer_id, || {
+                let pool = pool.clone();
+                let address = address.clone();
+                let request = request.clone();
+
+                Box::pin(async move {
+                    let mut client = pool.get_connection(peer_id, &address).await?;
+                    let response = client
+                        .request_vote(Request::new(request))
+                        .await
+                        .map_err(|e| NetworkError::TransportError(e.to_string()))?;
+                    Ok(response.into_inner())
+                })
             })
-        }).await?;
-        
+            .await?;
+
         Ok(Some(RaftMessage::RequestVoteResponse {
             term: response.term,
             vote_granted: response.vote_granted,
             from_id: response.from_id as u128,
         }))
     }
-    
+
     async fn send_append_entries(
         &self,
         peer_id: NodeId,
@@ -421,22 +458,24 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
         leader_commit: LogIndex,
     ) -> Result<Option<RaftMessage<T>>, NetworkError> {
         let peers = self.peers.read().await;
-        let peer = peers.get(&peer_id)
+        let peer = peers
+            .get(&peer_id)
             .ok_or_else(|| NetworkError::PeerNotFound(peer_id))?;
         let address = peer.address.clone();
         drop(peers);
-        
+
         let pool = self.pool.clone();
-        
+
         // Convert entries to proto format
-        let proto_entries: Vec<proto::LogEntry> = entries.iter().map(|e| {
-            proto::LogEntry {
+        let proto_entries: Vec<proto::LogEntry> = entries
+            .iter()
+            .map(|e| proto::LogEntry {
                 term: e.term,
                 index: e.index,
                 command: bincode::serialize(&e.command).unwrap_or_default(),
-            }
-        }).collect();
-        
+            })
+            .collect();
+
         let request = proto::AppendEntriesRequest {
             term,
             leader_id: leader_id as u64,
@@ -445,20 +484,24 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             entries: proto_entries,
             leader_commit,
         };
-        
-        let response = self.send_with_retry(peer_id, || {
-            let pool = pool.clone();
-            let address = address.clone();
-            let request = request.clone();
-            
-            Box::pin(async move {
-                let mut client = pool.get_connection(peer_id, &address).await?;
-                let response = client.append_entries(Request::new(request)).await
-                    .map_err(|e| NetworkError::TransportError(e.to_string()))?;
-                Ok(response.into_inner())
+
+        let response = self
+            .send_with_retry(peer_id, || {
+                let pool = pool.clone();
+                let address = address.clone();
+                let request = request.clone();
+
+                Box::pin(async move {
+                    let mut client = pool.get_connection(peer_id, &address).await?;
+                    let response = client
+                        .append_entries(Request::new(request))
+                        .await
+                        .map_err(|e| NetworkError::TransportError(e.to_string()))?;
+                    Ok(response.into_inner())
+                })
             })
-        }).await?;
-        
+            .await?;
+
         Ok(Some(RaftMessage::AppendEntriesResponse {
             term: response.term,
             success: response.success,
@@ -466,7 +509,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             from_id: response.from_id as u128,
         }))
     }
-    
+
     async fn send_install_snapshot(
         &self,
         peer_id: NodeId,
@@ -475,16 +518,17 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
         snapshot: Snapshot<T>,
     ) -> Result<Option<RaftMessage<T>>, NetworkError> {
         let peers = self.peers.read().await;
-        let peer = peers.get(&peer_id)
+        let peer = peers
+            .get(&peer_id)
             .ok_or_else(|| NetworkError::PeerNotFound(peer_id))?;
         let address = peer.address.clone();
         drop(peers);
-        
+
         let pool = self.pool.clone();
-        
+
         let data = bincode::serialize(&snapshot.data)
             .map_err(|e| NetworkError::SerializationError(e.to_string()))?;
-        
+
         let request = proto::InstallSnapshotRequest {
             term,
             leader_id: leader_id as u64,
@@ -493,43 +537,50 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             data,
             checksum: snapshot.checksum,
         };
-        
-        let response = self.send_with_retry(peer_id, || {
-            let pool = pool.clone();
-            let address = address.clone();
-            let request = request.clone();
-            
-            Box::pin(async move {
-                let mut client = pool.get_connection(peer_id, &address).await?;
-                let response = client.install_snapshot(Request::new(request)).await
-                    .map_err(|e| NetworkError::TransportError(e.to_string()))?;
-                Ok(response.into_inner())
+
+        let response = self
+            .send_with_retry(peer_id, || {
+                let pool = pool.clone();
+                let address = address.clone();
+                let request = request.clone();
+
+                Box::pin(async move {
+                    let mut client = pool.get_connection(peer_id, &address).await?;
+                    let response = client
+                        .install_snapshot(Request::new(request))
+                        .await
+                        .map_err(|e| NetworkError::TransportError(e.to_string()))?;
+                    Ok(response.into_inner())
+                })
             })
-        }).await?;
-        
+            .await?;
+
         Ok(Some(RaftMessage::InstallSnapshotResponse {
             term: response.term,
             success: response.success,
             from_id: response.from_id as u128,
         }))
     }
-    
+
     async fn receive(&self) -> Result<RaftMessage<T>, NetworkError> {
         let mut inbox = self.inbox.lock().await;
-        inbox.recv().await.ok_or(NetworkError::TransportError("Channel closed".into()))
+        inbox
+            .recv()
+            .await
+            .ok_or(NetworkError::TransportError("Channel closed".into()))
     }
-    
+
     async fn respond(&self, to: NodeId, message: RaftMessage<T>) -> Result<(), NetworkError> {
         // For gRPC, responses are sent synchronously in the RPC handler
         // This is a no-op for the client side
         Ok(())
     }
-    
+
     fn peer_ids(&self) -> Vec<NodeId> {
         // This is blocking, use sparingly
         Vec::new()
     }
-    
+
     async fn update_peers(&self, peers: Vec<PeerInfo>) -> Result<(), NetworkError> {
         let mut peer_map = self.peers.write().await;
         peer_map.clear();
@@ -552,7 +603,9 @@ pub struct RaftGrpcServer<T> {
     _phantom: std::marker::PhantomData<T>,
 }
 
-impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static> RaftGrpcServer<T> {
+impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static>
+    RaftGrpcServer<T>
+{
     pub fn new(node_id: NodeId, inbox_sender: tokio::sync::mpsc::Sender<RaftMessage<T>>) -> Self {
         Self {
             node_id,
@@ -563,13 +616,15 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
 }
 
 #[tonic::async_trait]
-impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static> Raft for RaftGrpcServer<T> {
+impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static> Raft
+    for RaftGrpcServer<T>
+{
     async fn request_vote(
         &self,
         request: Request<proto::RequestVoteRequest>,
     ) -> Result<Response<proto::RequestVoteResponse>, Status> {
         let req = request.into_inner();
-        
+
         // Send to Raft engine for processing
         let msg = RaftMessage::RequestVote {
             term: req.term,
@@ -577,10 +632,12 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             last_log_index: req.last_log_index,
             last_log_term: req.last_log_term,
         };
-        
-        self.inbox_sender.send(msg).await
+
+        self.inbox_sender
+            .send(msg)
+            .await
             .map_err(|e| Status::internal(e.to_string()))?;
-        
+
         // Return placeholder - actual response handled by engine
         Ok(Response::new(proto::RequestVoteResponse {
             term: 0,
@@ -588,23 +645,27 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             from_id: self.node_id as u64,
         }))
     }
-    
+
     async fn append_entries(
         &self,
         request: Request<proto::AppendEntriesRequest>,
     ) -> Result<Response<proto::AppendEntriesResponse>, Status> {
         let req = request.into_inner();
-        
+
         // Convert proto entries
-        let entries: Vec<LogEntry<T>> = req.entries.iter().filter_map(|e| {
-            let command: T = bincode::deserialize(&e.command).ok()?;
-            Some(LogEntry {
-                term: e.term,
-                index: e.index,
-                command,
+        let entries: Vec<LogEntry<T>> = req
+            .entries
+            .iter()
+            .filter_map(|e| {
+                let command: T = bincode::deserialize(&e.command).ok()?;
+                Some(LogEntry {
+                    term: e.term,
+                    index: e.index,
+                    command,
+                })
             })
-        }).collect();
-        
+            .collect();
+
         let msg = RaftMessage::AppendEntries {
             term: req.term,
             leader_id: req.leader_id as u128,
@@ -613,10 +674,12 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             entries,
             leader_commit: req.leader_commit,
         };
-        
-        self.inbox_sender.send(msg).await
+
+        self.inbox_sender
+            .send(msg)
+            .await
             .map_err(|e| Status::internal(e.to_string()))?;
-        
+
         Ok(Response::new(proto::AppendEntriesResponse {
             term: 0,
             success: true,
@@ -624,32 +687,34 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             from_id: self.node_id as u64,
         }))
     }
-    
+
     async fn install_snapshot(
         &self,
         request: Request<proto::InstallSnapshotRequest>,
     ) -> Result<Response<proto::InstallSnapshotResponse>, Status> {
         let req = request.into_inner();
-        
-        let data: T = bincode::deserialize(&req.data)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        
+
+        let data: T =
+            bincode::deserialize(&req.data).map_err(|e| Status::invalid_argument(e.to_string()))?;
+
         let snapshot = Snapshot {
             last_included_index: req.last_included_index,
             last_included_term: req.last_included_term,
             data,
             checksum: req.checksum,
         };
-        
+
         let msg = RaftMessage::InstallSnapshot {
             term: req.term,
             leader_id: req.leader_id as u128,
             snapshot,
         };
-        
-        self.inbox_sender.send(msg).await
+
+        self.inbox_sender
+            .send(msg)
+            .await
             .map_err(|e| Status::internal(e.to_string()))?;
-        
+
         Ok(Response::new(proto::InstallSnapshotResponse {
             term: 0,
             success: true,
@@ -659,21 +724,23 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
 }
 
 /// Starts the gRPC server.
-pub async fn start_grpc_server<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static>(
+pub async fn start_grpc_server<
+    T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
+>(
     bind_addr: &str,
     node_id: NodeId,
     inbox_sender: tokio::sync::mpsc::Sender<RaftMessage<T>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr = bind_addr.parse()?;
     let server = RaftGrpcServer::new(node_id, inbox_sender);
-    
+
     tracing::info!(addr = bind_addr, "Starting gRPC server");
-    
+
     Server::builder()
         .add_service(RaftServer::new(server))
         .serve(addr)
         .await?;
-    
+
     Ok(())
 }
 
@@ -684,14 +751,14 @@ pub async fn start_grpc_server<T: Clone + Send + Sync + serde::Serialize + serde
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_circuit_breaker_closed() {
         let cb = CircuitBreaker::new(CircuitBreakerConfig::default());
         assert_eq!(cb.state(), CircuitState::Closed);
         assert!(cb.allow_request());
     }
-    
+
     #[test]
     fn test_circuit_breaker_opens_after_failures() {
         let config = CircuitBreakerConfig {
@@ -700,16 +767,16 @@ mod tests {
             reset_timeout: Duration::from_millis(100),
         };
         let cb = CircuitBreaker::new(config);
-        
+
         cb.record_failure();
         cb.record_failure();
         assert_eq!(cb.state(), CircuitState::Closed);
-        
+
         cb.record_failure();
         assert_eq!(cb.state(), CircuitState::Open);
         assert!(!cb.allow_request());
     }
-    
+
     #[test]
     fn test_circuit_breaker_half_open_after_timeout() {
         let config = CircuitBreakerConfig {
@@ -718,16 +785,16 @@ mod tests {
             reset_timeout: Duration::from_millis(10),
         };
         let cb = CircuitBreaker::new(config);
-        
+
         cb.record_failure();
         assert_eq!(cb.state(), CircuitState::Open);
-        
+
         std::thread::sleep(Duration::from_millis(20));
-        
+
         assert!(cb.allow_request());
         assert_eq!(cb.state(), CircuitState::HalfOpen);
     }
-    
+
     #[test]
     fn test_circuit_breaker_closes_after_success() {
         let config = CircuitBreakerConfig {
@@ -736,15 +803,15 @@ mod tests {
             reset_timeout: Duration::from_millis(1),
         };
         let cb = CircuitBreaker::new(config);
-        
+
         cb.record_failure();
         std::thread::sleep(Duration::from_millis(5));
         cb.allow_request(); // Transition to half-open
-        
+
         cb.record_success();
         assert_eq!(cb.state(), CircuitState::Closed);
     }
-    
+
     #[test]
     fn test_grpc_config_default() {
         let config = GrpcConfig::default();

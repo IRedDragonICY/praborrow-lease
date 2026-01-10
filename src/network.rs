@@ -2,12 +2,12 @@
 //!
 //! Provides abstract network interface and implementations for consensus messaging.
 
+use crate::raft::{LogEntry, LogIndex, NodeId, Snapshot, Term};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use crate::raft::{Term, NodeId, LogIndex, LogEntry, Snapshot};
-use std::time::Duration;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Maximum UDP packet size (theoretical max is 65507, but we use a safer limit)
 pub const MAX_PACKET_SIZE: usize = 4096;
@@ -70,7 +70,6 @@ impl NetworkConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RaftMessage<T> {
     // ===== RequestVote RPC (§5.2) =====
-    
     /// Invoked by candidates to gather votes
     RequestVote {
         /// Candidate's term
@@ -82,7 +81,7 @@ pub enum RaftMessage<T> {
         /// Term of candidate's last log entry
         last_log_term: Term,
     },
-    
+
     /// Response to RequestVote RPC
     RequestVoteResponse {
         /// Current term, for candidate to update itself
@@ -92,9 +91,8 @@ pub enum RaftMessage<T> {
         /// Responder's node ID
         from_id: NodeId,
     },
-    
+
     // ===== AppendEntries RPC (§5.3) =====
-    
     /// Invoked by leader to replicate log entries; also used as heartbeat
     AppendEntries {
         /// Leader's term
@@ -110,7 +108,7 @@ pub enum RaftMessage<T> {
         /// Leader's commit index
         leader_commit: LogIndex,
     },
-    
+
     /// Response to AppendEntries RPC
     AppendEntriesResponse {
         /// Current term, for leader to update itself
@@ -122,9 +120,8 @@ pub enum RaftMessage<T> {
         /// Responder's node ID
         from_id: NodeId,
     },
-    
+
     // ===== InstallSnapshot RPC (§7) =====
-    
     /// Invoked by leader to send chunks of a snapshot to a follower
     InstallSnapshot {
         /// Leader's term
@@ -134,7 +131,7 @@ pub enum RaftMessage<T> {
         /// Snapshot data
         snapshot: Snapshot<T>,
     },
-    
+
     /// Response to InstallSnapshot RPC
     InstallSnapshotResponse {
         /// Current term, for leader to update itself
@@ -189,6 +186,7 @@ pub struct PeerInfo {
 #[async_trait]
 pub trait RaftNetwork<T: Send + Sync + Clone>: Send + Sync {
     /// Sends a RequestVote RPC to a specific peer.
+    #[allow(clippy::too_many_arguments)]
     async fn send_request_vote(
         &self,
         peer_id: NodeId,
@@ -197,8 +195,9 @@ pub trait RaftNetwork<T: Send + Sync + Clone>: Send + Sync {
         last_log_index: LogIndex,
         last_log_term: Term,
     ) -> Result<Option<RaftMessage<T>>, NetworkError>;
-    
+
     /// Sends an AppendEntries RPC to a specific peer.
+    #[allow(clippy::too_many_arguments)]
     async fn send_append_entries(
         &self,
         peer_id: NodeId,
@@ -209,7 +208,7 @@ pub trait RaftNetwork<T: Send + Sync + Clone>: Send + Sync {
         entries: Vec<LogEntry<T>>,
         leader_commit: LogIndex,
     ) -> Result<Option<RaftMessage<T>>, NetworkError>;
-    
+
     /// Sends an InstallSnapshot RPC to a specific peer.
     async fn send_install_snapshot(
         &self,
@@ -218,16 +217,16 @@ pub trait RaftNetwork<T: Send + Sync + Clone>: Send + Sync {
         leader_id: NodeId,
         snapshot: Snapshot<T>,
     ) -> Result<Option<RaftMessage<T>>, NetworkError>;
-    
+
     /// Receives the next incoming RPC message.
     async fn receive(&self) -> Result<RaftMessage<T>, NetworkError>;
-    
+
     /// Responds to an incoming RPC.
     async fn respond(&self, to: NodeId, message: RaftMessage<T>) -> Result<(), NetworkError>;
-    
+
     /// Gets the list of peer IDs.
     fn peer_ids(&self) -> Vec<NodeId>;
-    
+
     /// Updates the peer list.
     async fn update_peers(&self, peers: Vec<PeerInfo>) -> Result<(), NetworkError>;
 }
@@ -252,10 +251,10 @@ pub enum NetworkError {
 pub trait ConsensusNetwork: Send + Sync {
     /// Broadcast a RequestVote RPC to all peers.
     async fn broadcast_vote_request(&self, term: Term, candidate_id: NodeId) -> Result<(), String>;
-    
+
     /// Send a Heartbeat (empty AppendEntries) to all peers.
     async fn send_heartbeat(&self, leader_id: NodeId, term: Term) -> Result<(), String>;
-    
+
     /// Receive the next packet from the network.
     async fn receive(&self) -> Result<Packet, String>;
 
@@ -269,7 +268,7 @@ pub trait ConsensusNetwork: Send + Sync {
 
 /// In-memory network transport for testing.
 pub struct InMemoryNetwork<T> {
-    node_id: NodeId,
+    _node_id: NodeId,
     peers: Arc<tokio::sync::RwLock<HashMap<NodeId, PeerInfo>>>,
     inbox: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<RaftMessage<T>>>>,
     outboxes: Arc<tokio::sync::RwLock<HashMap<NodeId, tokio::sync::mpsc::Sender<RaftMessage<T>>>>>,
@@ -277,27 +276,37 @@ pub struct InMemoryNetwork<T> {
 
 impl<T: Send + Sync + Clone + 'static> InMemoryNetwork<T> {
     /// Creates a new in-memory network node.
-    pub fn new(
-        node_id: NodeId,
-        inbox_rx: tokio::sync::mpsc::Receiver<RaftMessage<T>>,
-    ) -> Self {
+    pub fn new(node_id: NodeId, inbox_rx: tokio::sync::mpsc::Receiver<RaftMessage<T>>) -> Self {
         Self {
-            node_id,
+            _node_id: node_id,
             peers: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             inbox: Arc::new(tokio::sync::Mutex::new(inbox_rx)),
             outboxes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
-    
+
     /// Registers a peer's outbox for sending messages.
-    pub async fn register_peer(&self, peer_id: NodeId, address: String, sender: tokio::sync::mpsc::Sender<RaftMessage<T>>) {
-        self.peers.write().await.insert(peer_id, PeerInfo { id: peer_id, address });
+    pub async fn register_peer(
+        &self,
+        peer_id: NodeId,
+        address: String,
+        sender: tokio::sync::mpsc::Sender<RaftMessage<T>>,
+    ) {
+        self.peers.write().await.insert(
+            peer_id,
+            PeerInfo {
+                id: peer_id,
+                address,
+            },
+        );
         self.outboxes.write().await.insert(peer_id, sender);
     }
 }
 
 #[async_trait]
-impl<T: Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static> RaftNetwork<T> for InMemoryNetwork<T> {
+impl<T: Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static>
+    RaftNetwork<T> for InMemoryNetwork<T>
+{
     async fn send_request_vote(
         &self,
         peer_id: NodeId,
@@ -307,19 +316,23 @@ impl<T: Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + '
         last_log_term: Term,
     ) -> Result<Option<RaftMessage<T>>, NetworkError> {
         let outboxes = self.outboxes.read().await;
-        let sender = outboxes.get(&peer_id)
-            .ok_or_else(|| NetworkError::PeerNotFound(peer_id))?;
-        
-        sender.send(RaftMessage::RequestVote {
-            term,
-            candidate_id,
-            last_log_index,
-            last_log_term,
-        }).await.map_err(|e| NetworkError::TransportError(e.to_string()))?;
-        
+        let sender = outboxes
+            .get(&peer_id)
+            .ok_or(NetworkError::PeerNotFound(peer_id))?;
+
+        sender
+            .send(RaftMessage::RequestVote {
+                term,
+                candidate_id,
+                last_log_index,
+                last_log_term,
+            })
+            .await
+            .map_err(|e| NetworkError::TransportError(e.to_string()))?;
+
         Ok(None) // Response comes via inbox
     }
-    
+
     async fn send_append_entries(
         &self,
         peer_id: NodeId,
@@ -331,21 +344,25 @@ impl<T: Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + '
         leader_commit: LogIndex,
     ) -> Result<Option<RaftMessage<T>>, NetworkError> {
         let outboxes = self.outboxes.read().await;
-        let sender = outboxes.get(&peer_id)
-            .ok_or_else(|| NetworkError::PeerNotFound(peer_id))?;
-        
-        sender.send(RaftMessage::AppendEntries {
-            term,
-            leader_id,
-            prev_log_index,
-            prev_log_term,
-            entries,
-            leader_commit,
-        }).await.map_err(|e| NetworkError::TransportError(e.to_string()))?;
-        
+        let sender = outboxes
+            .get(&peer_id)
+            .ok_or(NetworkError::PeerNotFound(peer_id))?;
+
+        sender
+            .send(RaftMessage::AppendEntries {
+                term,
+                leader_id,
+                prev_log_index,
+                prev_log_term,
+                entries,
+                leader_commit,
+            })
+            .await
+            .map_err(|e| NetworkError::TransportError(e.to_string()))?;
+
         Ok(None)
     }
-    
+
     async fn send_install_snapshot(
         &self,
         peer_id: NodeId,
@@ -354,36 +371,47 @@ impl<T: Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + '
         snapshot: Snapshot<T>,
     ) -> Result<Option<RaftMessage<T>>, NetworkError> {
         let outboxes = self.outboxes.read().await;
-        let sender = outboxes.get(&peer_id)
-            .ok_or_else(|| NetworkError::PeerNotFound(peer_id))?;
-        
-        sender.send(RaftMessage::InstallSnapshot {
-            term,
-            leader_id,
-            snapshot,
-        }).await.map_err(|e| NetworkError::TransportError(e.to_string()))?;
-        
+        let sender = outboxes
+            .get(&peer_id)
+            .ok_or(NetworkError::PeerNotFound(peer_id))?;
+
+        sender
+            .send(RaftMessage::InstallSnapshot {
+                term,
+                leader_id,
+                snapshot,
+            })
+            .await
+            .map_err(|e| NetworkError::TransportError(e.to_string()))?;
+
         Ok(None)
     }
-    
+
     async fn receive(&self) -> Result<RaftMessage<T>, NetworkError> {
         let mut inbox = self.inbox.lock().await;
-        inbox.recv().await.ok_or(NetworkError::TransportError("Channel closed".into()))
+        inbox
+            .recv()
+            .await
+            .ok_or(NetworkError::TransportError("Channel closed".into()))
     }
-    
+
     async fn respond(&self, to: NodeId, message: RaftMessage<T>) -> Result<(), NetworkError> {
         let outboxes = self.outboxes.read().await;
-        let sender = outboxes.get(&to)
-            .ok_or_else(|| NetworkError::PeerNotFound(to))?;
-        
-        sender.send(message).await.map_err(|e| NetworkError::TransportError(e.to_string()))
+        let sender = outboxes
+            .get(&to)
+            .ok_or(NetworkError::PeerNotFound(to))?;
+
+        sender
+            .send(message)
+            .await
+            .map_err(|e| NetworkError::TransportError(e.to_string()))
     }
-    
+
     fn peer_ids(&self) -> Vec<NodeId> {
         // Blocking read - only for simple cases
         Vec::new()
     }
-    
+
     async fn update_peers(&self, peers: Vec<PeerInfo>) -> Result<(), NetworkError> {
         let mut peer_map = self.peers.write().await;
         peer_map.clear();
@@ -432,9 +460,9 @@ pub mod udp {
             peers: Vec<String>,
             config: NetworkConfig,
         ) -> Result<Self, String> {
-            let socket = UdpSocket::bind(bind_addr).await.map_err(|e| {
-                format!("Failed to bind UDP socket to '{}': {}", bind_addr, e)
-            })?;
+            let socket = UdpSocket::bind(bind_addr)
+                .await
+                .map_err(|e| format!("Failed to bind UDP socket to '{}': {}", bind_addr, e))?;
 
             tracing::info!(
                 bind_addr = bind_addr,
@@ -453,7 +481,11 @@ pub mod udp {
 
     #[async_trait]
     impl ConsensusNetwork for UdpTransport {
-        async fn broadcast_vote_request(&self, term: Term, candidate_id: NodeId) -> Result<(), String> {
+        async fn broadcast_vote_request(
+            &self,
+            term: Term,
+            candidate_id: NodeId,
+        ) -> Result<(), String> {
             let packet = Packet::VoteRequest { term, candidate_id };
             let serialized = serde_json::to_vec(&packet).map_err(|e| e.to_string())?;
 
@@ -480,22 +512,25 @@ pub mod udp {
 
         async fn receive(&self) -> Result<Packet, String> {
             let mut buf = vec![0u8; self.config.buffer_size];
-            
+
             loop {
-                match tokio::time::timeout(self.config.read_timeout, self.socket.recv_from(&mut buf)).await {
-                    Ok(io_result) => {
-                        match io_result {
-                            Ok((amt, _src)) => {
-                                let packet: Packet = serde_json::from_slice(&buf[..amt])
-                                    .map_err(|e| e.to_string())?;
-                                return Ok(packet);
-                            }
-                            Err(e) => {
-                                tracing::error!("UDP receive IO error: {}", e);
-                                tokio::time::sleep(Duration::from_millis(50)).await;
-                            }
+                match tokio::time::timeout(
+                    self.config.read_timeout,
+                    self.socket.recv_from(&mut buf),
+                )
+                .await
+                {
+                    Ok(io_result) => match io_result {
+                        Ok((amt, _src)) => {
+                            let packet: Packet =
+                                serde_json::from_slice(&buf[..amt]).map_err(|e| e.to_string())?;
+                            return Ok(packet);
                         }
-                    }
+                        Err(e) => {
+                            tracing::error!("UDP receive IO error: {}", e);
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                    },
                     Err(_) => {
                         // Timeout - continue loop
                     }
@@ -541,7 +576,7 @@ mod tests {
         };
         let serialized = serde_json::to_vec(&packet).unwrap();
         let deserialized: Packet = serde_json::from_slice(&serialized).unwrap();
-        
+
         match deserialized {
             Packet::VoteRequest { term, candidate_id } => {
                 assert_eq!(term, 1);
@@ -553,9 +588,9 @@ mod tests {
 
     #[cfg(feature = "net")]
     mod udp_tests {
-        use super::super::*;
         use super::super::udp::UdpTransport;
-        
+        use super::super::*;
+
         #[tokio::test]
         async fn test_invalid_bind_address() {
             let result = UdpTransport::new("not-an-address", vec![]).await;
