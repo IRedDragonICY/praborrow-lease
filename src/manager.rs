@@ -36,6 +36,21 @@ impl<'a, T> LeaseManager<'a, T> {
         // For now: NO-OP mock.
         true
     }
+
+    /// Processing a returned lease and issuing a repatriation token.
+    ///
+    /// This consumes the lease (conceptually) and returns the token required
+    /// to restore the resource to domestic jurisdiction.
+    ///
+    /// # Safety
+    ///
+    /// The manager assumes that if the lease is being returned, the remote
+    /// holder has truly relinquished it.
+    pub fn return_lease(&self, _lease: Lease<T>) -> praborrow_core::RepatriationToken {
+        // In a real system, we'd verify signatures/messages here.
+        // For now, we trust the Lease object proves it was held.
+        unsafe { praborrow_core::RepatriationToken::new() }
+    }
 }
 
 #[cfg(test)]

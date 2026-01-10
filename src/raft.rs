@@ -185,19 +185,20 @@ impl<T: Clone + Send + serde::Serialize + serde::de::DeserializeOwned> RaftStora
     fn append_entries(&mut self, entries: &[LogEntry<T>]) -> Result<(), ConsensusError> {
         let log_tree = self.db.open_tree("log").map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         
-        // Find the next index (simplified: just count keys for now, or use autoincrement idea)
-        // For a real Raft, we need accurate indices. 
-        // Assuming append is always at the end for this simple impl, or we need to know the current index.
-        // Let's rely on the current count + 1.
         let mut current_idx = log_tree.len() as u64;
+        let mut batch = sled::Batch::default();
 
         for entry in entries {
             let key = current_idx.to_be_bytes();
             let value = bincode::serialize(entry).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-            log_tree.insert(key, value).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            
+            // Batch insertion
+            batch.insert(&key, value);
             current_idx += 1;
         }
         
+        // Apply batch and flush
+        log_tree.apply_batch(batch).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         self.db.flush().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         Ok(())
     }
