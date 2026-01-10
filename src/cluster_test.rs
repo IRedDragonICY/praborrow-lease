@@ -97,6 +97,7 @@ pub struct MessageRouter<T: Clone + Send + Sync + 'static> {
     senders: HashMap<NodeId, mpsc::Sender<RaftMessage<T>>>,
 }
 
+#[allow(dead_code)]
 impl<T: Clone + Send + Sync + 'static> MessageRouter<T> {
     pub fn new() -> Self {
         Self {
