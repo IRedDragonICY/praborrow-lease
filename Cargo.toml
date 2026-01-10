@@ -8,15 +8,15 @@ repository.workspace = true
 description = "Lease consensus logic (Raft/Paxos). Manages distributed agreement on Sovereign lease validity."
 
 [dependencies]
-praborrow-core = { path = "../praborrow-core", version = "0.5.0" }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0"
-async-trait = "0.1"
-tracing = "0.1"
-tokio = { version = "1.49.0", features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"], optional = true }
-thiserror = "2.0.17"
-sled = "0.34"
-bincode = "1.3"
+praborrow-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, optional = true }
+thiserror = { workspace = true }
+sled = { workspace = true }
+bincode = { workspace = true }
 
 [features]
 default = ["std"]
@@ -25,7 +25,5 @@ net = ["std"]
 tokio = ["dep:tokio"]
 
 [dev-dependencies]
-tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros"] }
-futures = "0.3"
-
-
+tokio = { workspace = true }
+futures = { workspace = true }
