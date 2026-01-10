@@ -83,16 +83,28 @@ pub mod udp {
         }
 
         async fn receive(&self) -> Result<Packet, String> {
-            let socket = self.socket.clone();
-            // This blocks the thread, which is not ideal for async, but fulfills the interface
-            // using standard UdpSocket without introducing tokio.
-            // In a real async system, we'd use use tokio::net::UdpSocket or spawn_blocking.
-            let (packet, _) = std::thread::spawn(move || {
-                let mut buf = [0u8; 4096];
-                let (amt, _src) = socket.recv_from(&mut buf).map_err(|e| e.to_string())?;
-                let packet: Packet = serde_json::from_slice(&buf[..amt]).map_err(|e| e.to_string())?;
-                Ok((packet, _src))
-            }).join().unwrap()?; // Unwrap thread panic, propagate Result
+            // Supervisor Loop: Restart thread if it panics
+            loop {
+                let socket_clone = self.socket.clone();
+                // This blocks the thread, which is not ideal for async, but fulfills the interface
+                // using standard UdpSocket without introducing tokio.
+                let handle = std::thread::spawn(move || {
+                    let mut buf = [0u8; 4096];
+                    let (amt, _src) = socket_clone.recv_from(&mut buf).map_err(|e| e.to_string())?;
+                    let packet: Packet = serde_json::from_slice(&buf[..amt]).map_err(|e| e.to_string())?;
+                    Ok((packet, _src))
+                });
+
+                match handle.join() {
+                    Ok(result) => return result.map(|(p, _)| p),
+                    Err(_) => {
+                        // Thread panicked. Log and restart.
+                        #[cfg(feature = "std")]
+                        eprintln!("CRITICAL: UDP Receiver thread panicked. Restarting supervisor...");
+                        continue;
+                    }
+                }
+            }
             
             Ok(packet)
         }

@@ -5,5 +5,6 @@
 mod manager;
 pub mod raft;
 pub mod network;
+pub mod engine;
 
 pub use manager::LeaseManager;
