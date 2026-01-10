@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package raft;
+
+// Raft consensus service
+service Raft {
+    // RequestVote RPC (§5.2)
+    rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+    
+    // AppendEntries RPC (§5.3) - also used for heartbeat
+    rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+    
+    // InstallSnapshot RPC (§7)
+    rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
+}
+
+// RequestVote RPC
+message RequestVoteRequest {
+    uint64 term = 1;
+    uint64 candidate_id = 2;
+    uint64 last_log_index = 3;
+    uint64 last_log_term = 4;
+}
+
+message RequestVoteResponse {
+    uint64 term = 1;
+    bool vote_granted = 2;
+    uint64 from_id = 3;
+}
+
+// AppendEntries RPC
+message AppendEntriesRequest {
+    uint64 term = 1;
+    uint64 leader_id = 2;
+    uint64 prev_log_index = 3;
+    uint64 prev_log_term = 4;
+    repeated LogEntry entries = 5;
+    uint64 leader_commit = 6;
+}
+
+message AppendEntriesResponse {
+    uint64 term = 1;
+    bool success = 2;
+    uint64 match_index = 3;
+    uint64 from_id = 4;
+}
+
+message LogEntry {
+    uint64 term = 1;
+    uint64 index = 2;
+    bytes command = 3;  // Serialized command
+}
+
+// InstallSnapshot RPC
+message InstallSnapshotRequest {
+    uint64 term = 1;
+    uint64 leader_id = 2;
+    uint64 last_included_index = 3;
+    uint64 last_included_term = 4;
+    bytes data = 5;
+    uint32 checksum = 6;
+}
+
+message InstallSnapshotResponse {
+    uint64 term = 1;
+    bool success = 2;
+    uint64 from_id = 3;
+}
