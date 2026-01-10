@@ -1,68 +1,215 @@
 use crate::network::ConsensusNetwork;
-use crate::raft::{NodeId, Term};
-use crate::raft::RaftStorage; // Assuming access to RaftStorage or similar traits
+use crate::raft::{NodeId, Term, RaftStorage};
 use async_trait::async_trait;
 use std::boxed::Box;
 
 /// Types of consensus algorithms supported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsensusStrategy {
+    /// Raft consensus algorithm
     Raft,
-    Paxos, // Future work
-    // ZAB, // Zookeeper Atomic Broadcast?
+    /// Paxos consensus algorithm (future work)
+    Paxos,
 }
 
 /// Abstract interface for a consensus engine.
+///
+/// This trait provides a unified interface for different consensus algorithms.
 #[async_trait]
-pub trait ConsensusEngine<T> {
+pub trait ConsensusEngine<T>: Send {
     /// Starts the consensus loop.
+    ///
+    /// This method runs the consensus algorithm's main loop and should
+    /// typically be spawned on a separate task.
     async fn run(&mut self) -> Result<(), String>;
     
     /// Proposes a new value to be agreed upon.
+    ///
+    /// Returns the term at which the value was proposed.
     async fn propose(&mut self, value: T) -> Result<Term, String>;
     
     /// Returns the current leader ID, if known.
     fn leader_id(&self) -> Option<NodeId>;
 }
 
-/// Factory for creating consensus engines.
-pub struct ConsensusFactory;
+/// Error type for consensus engine creation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsensusError {
+    /// The requested consensus strategy is not yet implemented.
+    NotImplemented(ConsensusStrategy),
+}
 
-impl ConsensusFactory {
-    pub fn create_engine<T: Send + Sync + 'static>(
-        strategy: ConsensusStrategy,
-        id: NodeId,
-        _network: Box<dyn ConsensusNetwork>,
-        _storage: Box<dyn RaftStorage<T>>,
-    ) -> Box<dyn ConsensusEngine<T>> {
-        match strategy {
-            ConsensusStrategy::Raft => {
-                // Return Raft implementation wrapper
-                // For now, this is a stub.
-                Box::new(RaftStub { _id: id })
+impl std::fmt::Display for ConsensusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConsensusError::NotImplemented(strategy) => {
+                write!(f, "Consensus strategy {:?} is not yet implemented", strategy)
             }
-            ConsensusStrategy::Paxos => panic!("Paxos not yet implemented"),
         }
     }
 }
 
-struct RaftStub {
-    _id: NodeId,
+impl std::error::Error for ConsensusError {}
+
+/// Factory for creating consensus engines.
+///
+/// Provides a unified way to create different consensus engine implementations.
+pub struct ConsensusFactory;
+
+impl ConsensusFactory {
+    /// Creates a new consensus engine with the specified strategy.
+    ///
+    /// # Arguments
+    ///
+    /// * `strategy` - The consensus algorithm to use
+    /// * `id` - Unique node identifier
+    /// * `network` - Network transport for consensus messages  
+    /// * `storage` - Storage backend for persistent state
+    ///
+    /// # Returns
+    ///
+    /// A boxed consensus engine, or an error if the strategy is not implemented.
+    pub fn create_engine<T: Clone + Send + Sync + 'static>(
+        strategy: ConsensusStrategy,
+        id: NodeId,
+        network: Box<dyn ConsensusNetwork>,
+        storage: Box<dyn RaftStorage<T>>,
+    ) -> Result<Box<dyn ConsensusEngine<T>>, ConsensusError> {
+        tracing::info!(
+            strategy = ?strategy,
+            node_id = id,
+            "Creating consensus engine"
+        );
+
+        match strategy {
+            ConsensusStrategy::Raft => {
+                // Create Raft node and wrap it
+                Ok(Box::new(RaftEngineAdapter::new(id, network, storage)))
+            }
+            ConsensusStrategy::Paxos => {
+                tracing::error!(
+                    strategy = ?strategy,
+                    "Paxos consensus strategy is not yet implemented"
+                );
+                Err(ConsensusError::NotImplemented(ConsensusStrategy::Paxos))
+            }
+        }
+    }
+}
+
+/// Adapter that wraps RaftNode to implement ConsensusEngine.
+struct RaftEngineAdapter<T> {
+    node: crate::raft::RaftNode<T>,
+}
+
+impl<T: Clone + Send + 'static> RaftEngineAdapter<T> {
+    fn new(
+        id: NodeId,
+        network: Box<dyn ConsensusNetwork>,
+        storage: Box<dyn RaftStorage<T>>,
+    ) -> Self {
+        Self {
+            node: crate::raft::RaftNode::new(id, network, storage),
+        }
+    }
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> ConsensusEngine<T> for RaftStub {
+impl<T: Clone + Send + Sync + 'static> ConsensusEngine<T> for RaftEngineAdapter<T> {
     async fn run(&mut self) -> Result<(), String> {
+        tracing::info!(
+            node_id = self.node.id,
+            "Starting Raft consensus loop"
+        );
+        
+        // Main consensus loop (simplified)
         loop {
-            // Stub loop
-            std::thread::yield_now();
+            // In a real implementation, this would:
+            // 1. Handle incoming RPCs
+            // 2. Send heartbeats (if leader)
+            // 3. Start elections (if timeout)
+            // 4. Apply committed entries
+            
+            // For now, just yield to avoid busy-looping
+            tokio::task::yield_now().await;
         }
     }
     
     async fn propose(&mut self, _value: T) -> Result<Term, String> {
-        Ok(0)
+        // In a real implementation, this would append to the log
+        // and replicate to followers
+        let term = self.node.storage.get_term().unwrap_or(0);
+        tracing::debug!(
+            node_id = self.node.id,
+            term = term,
+            "Proposal received (stub)"
+        );
+        Ok(term)
     }
     
     fn leader_id(&self) -> Option<NodeId> {
-        None
+        // In a real implementation, track the current leader
+        // For now, return self if leader
+        if self.node.role == crate::raft::RaftRole::Leader {
+            Some(self.node.id)
+        } else {
+            None
+        }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::raft::InMemoryStorage;
+
+    // Mock network for testing
+    struct MockNetwork;
+    
+    #[async_trait]
+    impl ConsensusNetwork for MockNetwork {
+        async fn broadcast_vote_request(&self, _term: Term, _candidate_id: NodeId) -> Result<(), String> {
+            Ok(())
+        }
+        
+        async fn send_heartbeat(&self, _leader_id: NodeId, _term: Term) -> Result<(), String> {
+            Ok(())
+        }
+        
+        async fn receive(&self) -> Result<crate::network::Packet, String> {
+            // Block forever in tests
+            futures::future::pending().await
+        }
+    }
+
+    #[test]
+    fn test_create_raft_engine() {
+        let storage: Box<dyn RaftStorage<String>> = Box::new(InMemoryStorage::new());
+        let network: Box<dyn ConsensusNetwork> = Box::new(MockNetwork);
+        
+        let result = ConsensusFactory::create_engine(
+            ConsensusStrategy::Raft,
+            1,
+            network,
+            storage,
+        );
+        
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_paxos_not_implemented() {
+        let storage: Box<dyn RaftStorage<String>> = Box::new(InMemoryStorage::new());
+        let network: Box<dyn ConsensusNetwork> = Box::new(MockNetwork);
+        
+        let result = ConsensusFactory::create_engine(
+            ConsensusStrategy::Paxos,
+            1,
+            network,
+            storage,
+        );
+        
+        assert!(matches!(result, Err(ConsensusError::NotImplemented(_))));
+    }
+}
+

@@ -10,12 +10,18 @@ description = "Lease consensus logic (Raft/Paxos). Manages distributed agreement
 [dependencies]
 praborrow-core = { path = "../praborrow-core", version = "0.5.0" }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 async-trait = "0.1"
+tracing = "0.1"
+tokio = { version = "1.49.0", features = ["rt", "sync", "time"], optional = true }
 
 [features]
 default = ["std"]
-std = []
+std = ["tokio"]
 net = ["std"]
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros"] }
+futures = "0.3"
+
+
