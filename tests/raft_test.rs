@@ -18,6 +18,10 @@ impl ConsensusNetwork for MockNetwork {
     async fn receive(&self) -> Result<Packet, String> {
         Err("Mock network - no packets".to_string())
     }
+
+    async fn update_peers(&self, _peers: Vec<String>) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[tokio::test]

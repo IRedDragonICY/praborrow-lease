@@ -21,35 +21,32 @@ pub trait ConsensusEngine<T>: Send {
     ///
     /// This method runs the consensus algorithm's main loop and should
     /// typically be spawned on a separate task.
-    async fn run(&mut self) -> Result<(), String>;
+    async fn run(&mut self) -> Result<(), ConsensusError>;
     
     /// Proposes a new value to be agreed upon.
     ///
     /// Returns the term at which the value was proposed.
-    async fn propose(&mut self, value: T) -> Result<Term, String>;
+    async fn propose(&mut self, value: T) -> Result<Term, ConsensusError>;
     
     /// Returns the current leader ID, if known.
     fn leader_id(&self) -> Option<NodeId>;
 }
 
-/// Error type for consensus engine creation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Error type for consensus engine operations.
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum ConsensusError {
     /// The requested consensus strategy is not yet implemented.
+    #[error("Consensus strategy {0:?} is not yet implemented")]
     NotImplemented(ConsensusStrategy),
+    #[error("Storage error: {0}")]
+    StorageError(String),
+    #[error("Network error: {0}")]
+    NetworkError(String),
+    #[error("Not leader")]
+    NotLeader,
+    #[error("Term mismatch")]
+    TermMismatch,
 }
-
-impl std::fmt::Display for ConsensusError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConsensusError::NotImplemented(strategy) => {
-                write!(f, "Consensus strategy {:?} is not yet implemented", strategy)
-            }
-        }
-    }
-}
-
-impl std::error::Error for ConsensusError {}
 
 /// Factory for creating consensus engines.
 ///
@@ -116,7 +113,7 @@ impl<T: Clone + Send + 'static> RaftEngineAdapter<T> {
 
 #[async_trait]
 impl<T: Clone + Send + Sync + 'static> ConsensusEngine<T> for RaftEngineAdapter<T> {
-    async fn run(&mut self) -> Result<(), String> {
+    async fn run(&mut self) -> Result<(), ConsensusError> {
         tracing::info!(
             node_id = self.node.id,
             "Starting Raft consensus loop"
@@ -135,7 +132,7 @@ impl<T: Clone + Send + Sync + 'static> ConsensusEngine<T> for RaftEngineAdapter<
         }
     }
     
-    async fn propose(&mut self, _value: T) -> Result<Term, String> {
+    async fn propose(&mut self, _value: T) -> Result<Term, ConsensusError> {
         // In a real implementation, this would append to the log
         // and replicate to followers
         let term = self.node.storage.get_term().unwrap_or(0);
@@ -179,6 +176,10 @@ mod tests {
         async fn receive(&self) -> Result<crate::network::Packet, String> {
             // Block forever in tests
             futures::future::pending().await
+        }
+
+        async fn update_peers(&self, _peers: Vec<String>) -> Result<(), String> {
+            Ok(())
         }
     }
 

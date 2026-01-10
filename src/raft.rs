@@ -1,7 +1,7 @@
 use serde::{Serialize, Deserialize};
 use crate::network::ConsensusNetwork;
-use std::boxed::Box;
 use std::path::PathBuf;
+use crate::engine::ConsensusError;
 
 pub type Term = u64;
 pub type NodeId = u128;
@@ -35,22 +35,29 @@ pub struct LogEntry<T> {
 /// without changing the Raft implementation.
 pub trait RaftStorage<T>: Send {
     /// Appends entries to the log.
-    fn append_entries(&mut self, entries: &[LogEntry<T>]) -> Result<(), String>;
+    fn append_entries(&mut self, entries: &[LogEntry<T>]) -> Result<(), ConsensusError>;
     
     /// Gets the current term.
-    fn get_term(&self) -> Result<Term, String>;
+    fn get_term(&self) -> Result<Term, ConsensusError>;
     
     /// Sets the current term.
-    fn set_term(&mut self, term: Term) -> Result<(), String>;
+    fn set_term(&mut self, term: Term) -> Result<(), ConsensusError>;
     
     /// Gets the voted-for candidate.
-    fn get_vote(&self) -> Result<Option<NodeId>, String>;
+    fn get_vote(&self) -> Result<Option<NodeId>, ConsensusError>;
     
     /// Sets the voted-for candidate.
-    fn set_vote(&mut self, vote: Option<NodeId>) -> Result<(), String>;
+    fn set_vote(&mut self, vote: Option<NodeId>) -> Result<(), ConsensusError>;
     
     /// Gets a reference to the log.
-    fn get_log(&self) -> Result<&[LogEntry<T>], String>;
+    /// Gets the log entries.
+    fn get_log(&self) -> Result<Vec<LogEntry<T>>, ConsensusError>;
+
+    /// Gets the current peer configuration.
+    fn get_peers(&self) -> Result<Vec<String>, ConsensusError>;
+
+    /// Sets the current peer configuration.
+    fn set_peers(&mut self, peers: &[String]) -> Result<(), ConsensusError>;
 }
 
 /// Default in-memory storage implementation.
@@ -61,6 +68,7 @@ pub struct InMemoryStorage<T> {
     current_term: Term,
     voted_for: Option<NodeId>,
     log: Vec<LogEntry<T>>,
+    peers: Vec<String>,
 }
 
 impl<T> InMemoryStorage<T> {
@@ -70,6 +78,7 @@ impl<T> InMemoryStorage<T> {
             current_term: 0,
             voted_for: None,
             log: Vec::new(),
+            peers: Vec::new(),
         }
     }
 }
@@ -81,7 +90,7 @@ impl<T> Default for InMemoryStorage<T> {
 }
 
 impl<T: Clone + Send> RaftStorage<T> for InMemoryStorage<T> {
-    fn append_entries(&mut self, entries: &[LogEntry<T>]) -> Result<(), String> {
+    fn append_entries(&mut self, entries: &[LogEntry<T>]) -> Result<(), ConsensusError> {
         tracing::trace!(
             entry_count = entries.len(),
             "Appending entries to in-memory log"
@@ -90,11 +99,11 @@ impl<T: Clone + Send> RaftStorage<T> for InMemoryStorage<T> {
         Ok(())
     }
 
-    fn get_term(&self) -> Result<Term, String> {
+    fn get_term(&self) -> Result<Term, ConsensusError> {
         Ok(self.current_term)
     }
 
-    fn set_term(&mut self, term: Term) -> Result<(), String> {
+    fn set_term(&mut self, term: Term) -> Result<(), ConsensusError> {
         tracing::debug!(
             old_term = self.current_term,
             new_term = term,
@@ -104,11 +113,11 @@ impl<T: Clone + Send> RaftStorage<T> for InMemoryStorage<T> {
         Ok(())
     }
 
-    fn get_vote(&self) -> Result<Option<NodeId>, String> {
+    fn get_vote(&self) -> Result<Option<NodeId>, ConsensusError> {
         Ok(self.voted_for)
     }
 
-    fn set_vote(&mut self, vote: Option<NodeId>) -> Result<(), String> {
+    fn set_vote(&mut self, vote: Option<NodeId>) -> Result<(), ConsensusError> {
         tracing::debug!(
             old_vote = ?self.voted_for,
             new_vote = ?vote,
@@ -118,8 +127,17 @@ impl<T: Clone + Send> RaftStorage<T> for InMemoryStorage<T> {
         Ok(())
     }
 
-    fn get_log(&self) -> Result<&[LogEntry<T>], String> {
-        Ok(&self.log)
+    fn get_log(&self) -> Result<Vec<LogEntry<T>>, ConsensusError> {
+        Ok(self.log.clone())
+    }
+
+    fn get_peers(&self) -> Result<Vec<String>, ConsensusError> {
+        Ok(self.peers.clone())
+    }
+
+    fn set_peers(&mut self, peers: &[String]) -> Result<(), ConsensusError> {
+        self.peers = peers.to_vec();
+        Ok(())
     }
 }
 
@@ -140,59 +158,113 @@ pub struct FileStorage<T> {
     /// Path to the storage directory
     #[allow(dead_code)]
     path: PathBuf,
-    /// In-memory cache of the state (backed by files in full impl)
-    inner: InMemoryStorage<T>,
+    /// Sled database instance
+    db: sled::Db,
+    /// Phantom data for T
+    _phantom: std::marker::PhantomData<T>,
 }
 
 impl<T> FileStorage<T> {
-    /// Creates a new file-based storage at the given path.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Directory path where state files will be stored
-    ///
-    /// # Note
-    ///
-    /// This is currently a stub that uses in-memory storage internally.
-    /// Future versions will persist state to disk.
     pub fn new(path: PathBuf) -> Self {
         tracing::info!(
             path = %path.display(),
-            "Creating file-based Raft storage (stub - data not persisted)"
+            "Opening persistent Raft storage"
         );
+        
+        let db = sled::open(&path).expect("Failed to open sled database");
+        
         Self {
             path,
-            inner: InMemoryStorage::new(),
+            db,
+            _phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl<T: Clone + Send> RaftStorage<T> for FileStorage<T> {
-    fn append_entries(&mut self, entries: &[LogEntry<T>]) -> Result<(), String> {
-        // TODO: Persist to file
-        self.inner.append_entries(entries)
+impl<T: Clone + Send + serde::Serialize + serde::de::DeserializeOwned> RaftStorage<T> for FileStorage<T> {
+    fn append_entries(&mut self, entries: &[LogEntry<T>]) -> Result<(), ConsensusError> {
+        let log_tree = self.db.open_tree("log").map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        
+        // Find the next index (simplified: just count keys for now, or use autoincrement idea)
+        // For a real Raft, we need accurate indices. 
+        // Assuming append is always at the end for this simple impl, or we need to know the current index.
+        // Let's rely on the current count + 1.
+        let mut current_idx = log_tree.len() as u64;
+
+        for entry in entries {
+            let key = current_idx.to_be_bytes();
+            let value = bincode::serialize(entry).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            log_tree.insert(key, value).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            current_idx += 1;
+        }
+        
+        self.db.flush().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        Ok(())
     }
 
-    fn get_term(&self) -> Result<Term, String> {
-        self.inner.get_term()
+    fn get_term(&self) -> Result<Term, ConsensusError> {
+        let meta = self.db.open_tree("meta").map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        if let Some(val) = meta.get(b"term").map_err(|e| ConsensusError::StorageError(e.to_string()))? {
+            let term: Term = bincode::deserialize(&val).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            Ok(term)
+        } else {
+            Ok(0)
+        }
     }
 
-    fn set_term(&mut self, term: Term) -> Result<(), String> {
-        // TODO: Persist to file
-        self.inner.set_term(term)
+    fn set_term(&mut self, term: Term) -> Result<(), ConsensusError> {
+        let meta = self.db.open_tree("meta").map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let val = bincode::serialize(&term).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        meta.insert(b"term", val).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        self.db.flush().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        Ok(())
     }
 
-    fn get_vote(&self) -> Result<Option<NodeId>, String> {
-        self.inner.get_vote()
+    fn get_vote(&self) -> Result<Option<NodeId>, ConsensusError> {
+        let meta = self.db.open_tree("meta").map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        if let Some(val) = meta.get(b"vote").map_err(|e| ConsensusError::StorageError(e.to_string()))? {
+            let vote: Option<NodeId> = bincode::deserialize(&val).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            Ok(vote)
+        } else {
+            Ok(None)
+        }
     }
 
-    fn set_vote(&mut self, vote: Option<NodeId>) -> Result<(), String> {
-        // TODO: Persist to file
-        self.inner.set_vote(vote)
+    fn set_vote(&mut self, vote: Option<NodeId>) -> Result<(), ConsensusError> {
+        let meta = self.db.open_tree("meta").map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let val = bincode::serialize(&vote).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        meta.insert(b"vote", val).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        self.db.flush().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        Ok(())
     }
 
-    fn get_log(&self) -> Result<&[LogEntry<T>], String> {
-        self.inner.get_log()
+    fn get_log(&self) -> Result<Vec<LogEntry<T>>, ConsensusError> {
+        let log_tree = self.db.open_tree("log").map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let mut entries = Vec::new();
+        for item in log_tree.iter() {
+            let (_, value) = item.map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            let entry: LogEntry<T> = bincode::deserialize(&value).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+
+    fn get_peers(&self) -> Result<Vec<String>, ConsensusError> {
+        let meta = self.db.open_tree("meta").map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        if let Some(val) = meta.get(b"peers").map_err(|e| ConsensusError::StorageError(e.to_string()))? {
+            let peers: Vec<String> = bincode::deserialize(&val).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            Ok(peers)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    fn set_peers(&mut self, peers: &[String]) -> Result<(), ConsensusError> {
+        let meta = self.db.open_tree("meta").map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let val = bincode::serialize(peers).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        meta.insert(b"peers", val).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        self.db.flush().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        Ok(())
     }
 }
 
@@ -347,6 +419,42 @@ impl<T: Clone + Send + 'static> RaftNode<T> {
         );
         false
     }
+    
+    /// Adds a peer to the cluster configuration.
+    ///
+    /// Updates both persistent storage and the active network transport.
+    pub async fn add_node(&mut self, peer_address: String) -> Result<(), ConsensusError> {
+        let mut peers = self.storage.get_peers()?;
+        if !peers.contains(&peer_address) {
+            peers.push(peer_address.clone());
+            self.storage.set_peers(&peers)?;
+            
+            // Notify network layer
+            if let Err(e) = self.network.update_peers(peers).await {
+                return Err(ConsensusError::NetworkError(e));
+            }
+            
+            tracing::info!(node_id = self.id, peer = peer_address, "Added node to cluster");
+        }
+        Ok(())
+    }
+
+    /// Removes a peer from the cluster configuration.
+    pub async fn remove_node(&mut self, peer_address: &str) -> Result<(), ConsensusError> {
+        let mut peers = self.storage.get_peers()?;
+        if let Some(pos) = peers.iter().position(|p| p == peer_address) {
+            peers.remove(pos);
+            self.storage.set_peers(&peers)?;
+            
+            // Notify network layer
+            if let Err(e) = self.network.update_peers(peers).await {
+                return Err(ConsensusError::NetworkError(e));
+            }
+
+            tracing::info!(node_id = self.id, peer = peer_address, "Removed node from cluster");
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -371,12 +479,35 @@ mod tests {
     }
 
     #[test]
-    fn test_file_storage_stub() {
-        let mut storage: FileStorage<String> = FileStorage::new(PathBuf::from("/tmp/raft-test"));
+    fn test_file_storage_persistence() {
+        let path = std::env::temp_dir().join("raft_test_storage");
+        // Clean up previous run
+        if path.exists() {
+            std::fs::remove_dir_all(&path).unwrap();
+        }
+
+        {
+            let mut storage: FileStorage<String> = FileStorage::new(path.clone());
+            storage.set_term(10).unwrap();
+            storage.set_vote(Some(1)).unwrap();
+            
+            let entry = LogEntry { term: 1, command: "test_persist".to_string() };
+            storage.append_entries(&[entry]).unwrap();
+        }
+
+        // Re-open
+        {
+            let storage: FileStorage<String> = FileStorage::new(path.clone());
+            assert_eq!(storage.get_term().unwrap(), 10);
+            assert_eq!(storage.get_vote().unwrap(), Some(1));
+            
+            let log = storage.get_log().unwrap();
+            assert_eq!(log.len(), 1);
+            assert_eq!(log[0].command, "test_persist");
+        }
         
-        // Should work like in-memory storage (stub behavior)
-        storage.set_term(10).unwrap();
-        assert_eq!(storage.get_term().unwrap(), 10);
+        // Cleanup
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
@@ -384,5 +515,72 @@ mod tests {
         assert_eq!(RaftRole::Follower.to_string(), "Follower");
         assert_eq!(RaftRole::Candidate.to_string(), "Candidate");
         assert_eq!(RaftRole::Leader.to_string(), "Leader");
+    }
+
+    #[tokio::test]
+    async fn test_raft_node_dynamic_membership() {
+        use crate::network::Packet;
+        use async_trait::async_trait;
+
+        // Mock network
+        struct MockNetwork {
+            peers: std::sync::Arc<std::sync::RwLock<Vec<String>>>,
+        }
+        #[async_trait]
+        impl ConsensusNetwork for MockNetwork {
+            async fn broadcast_vote_request(&self, _term: Term, _candidate_id: NodeId) -> Result<(), String> { Ok(()) }
+            async fn send_heartbeat(&self, _leader_id: NodeId, _term: Term) -> Result<(), String> { Ok(()) }
+            async fn receive(&self) -> Result<Packet, String> { futures::future::pending().await }
+            async fn update_peers(&self, peers: Vec<String>) -> Result<(), String> {
+                *self.peers.write().unwrap() = peers;
+                Ok(())
+            }
+        }
+        
+        let mock_network = Box::new(MockNetwork { peers: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())) });
+        // We need a handle to verify network updates, but Box<dyn> consumes it.
+        // So we'll trust the interaction or do a more complex setup if needed.
+        // Actually, we can use a shared state.
+        
+        let shared_peers = std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        struct SharedMockNetwork(std::sync::Arc<std::sync::RwLock<Vec<String>>>);
+        #[async_trait]
+        impl ConsensusNetwork for SharedMockNetwork {
+            async fn broadcast_vote_request(&self, _t: Term, _c: NodeId) -> Result<(), String> { Ok(()) }
+            async fn send_heartbeat(&self, _l: NodeId, _t: Term) -> Result<(), String> { Ok(()) }
+            async fn receive(&self) -> Result<Packet, String> { futures::future::pending().await }
+            async fn update_peers(&self, peers: Vec<String>) -> Result<(), String> {
+                *self.0.write().unwrap() = peers;
+                Ok(())
+            }
+        }
+        
+        let network = Box::new(SharedMockNetwork(shared_peers.clone()));
+        let mut node = RaftNode::new(1, network, Box::new(InMemoryStorage::<String>::new()));
+        
+        // Initial state
+        assert!(node.storage.get_peers().unwrap().is_empty());
+        assert!(shared_peers.read().unwrap().is_empty());
+        
+        // Add node
+        node.add_node("192.168.1.10:8000".to_string()).await.unwrap();
+        
+        // Verify storage
+        let peers = node.storage.get_peers().unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0], "192.168.1.10:8000");
+        
+        // Verify network
+        assert_eq!(shared_peers.read().unwrap().len(), 1);
+        
+        // Add duplicate (should be ignored)
+        node.add_node("192.168.1.10:8000".to_string()).await.unwrap();
+         let peers = node.storage.get_peers().unwrap();
+        assert_eq!(peers.len(), 1);
+        
+        // Remove node
+        node.remove_node("192.168.1.10:8000").await.unwrap();
+        assert!(node.storage.get_peers().unwrap().is_empty());
+        assert!(shared_peers.read().unwrap().is_empty());
     }
 }
