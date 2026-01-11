@@ -22,8 +22,9 @@ use proto::raft_client::RaftClient;
 use proto::raft_server::{Raft, RaftServer};
 use tonic::{
     Request, Response, Status,
-    transport::{Channel, Endpoint, Server},
+    transport::{Channel, Endpoint, Server, Certificate, Identity, ClientTlsConfig, ServerTlsConfig},
 };
+use std::fs;
 
 // ============================================================================
 // CONFIGURATION
@@ -84,6 +85,8 @@ pub struct TlsConfig {
     pub client_cert: Option<std::path::PathBuf>,
     /// Client key for mTLS (optional)
     pub client_key: Option<std::path::PathBuf>,
+    /// Domain name for verification (defaults to "localhost" if None)
+    pub domain_name: Option<String>,
 }
 
 /// Circuit breaker configuration.
@@ -266,6 +269,30 @@ impl ConnectionPool {
             .map_err(|e| NetworkError::ConnectionFailed(e.to_string()))?
             .connect_timeout(self.config.connect_timeout)
             .timeout(self.config.request_timeout);
+
+        let endpoint = if let Some(tls) = &self.config.tls {
+             let pem = fs::read_to_string(&tls.ca_cert)
+                .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to read CA cert: {}", e)))?;
+             let ca = Certificate::from_pem(pem);
+
+             let mut tls_config = ClientTlsConfig::new()
+                .ca_certificate(ca)
+                .domain_name(tls.domain_name.as_deref().unwrap_or("localhost"));
+
+             if let (Some(cert_path), Some(key_path)) = (&tls.client_cert, &tls.client_key) {
+                 let cert = fs::read_to_string(cert_path)
+                    .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to read client cert: {}", e)))?;
+                 let key = fs::read_to_string(key_path)
+                    .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to read client key: {}", e)))?;
+                 let identity = Identity::from_pem(cert, key);
+                 tls_config = tls_config.identity(identity);
+             }
+
+             endpoint.tls_config(tls_config)
+                .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to configure TLS: {}", e)))?
+        } else {
+            endpoint
+        };
 
         let channel = endpoint
             .connect()
@@ -472,6 +499,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             .map(|e| proto::LogEntry {
                 term: e.term,
                 index: e.index,
+                // Serialize the entire LogCommand (which covers NoOp, App(T), and Config)
                 command: bincode::serialize(&e.command).unwrap_or_default(),
             })
             .collect();
@@ -657,7 +685,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             .entries
             .iter()
             .filter_map(|e| {
-                let command: T = bincode::deserialize(&e.command).ok()?;
+                let command: crate::raft::LogCommand<T> = bincode::deserialize(&e.command).ok()?;
                 Some(LogEntry {
                     term: e.term,
                     index: e.index,
@@ -729,14 +757,35 @@ pub async fn start_grpc_server<
 >(
     bind_addr: &str,
     node_id: NodeId,
+    config: GrpcConfig,
     inbox_sender: tokio::sync::mpsc::Sender<RaftMessage<T>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr = bind_addr.parse()?;
     let server = RaftGrpcServer::new(node_id, inbox_sender);
 
+    let server = RaftGrpcServer::new(node_id, inbox_sender);
+
     tracing::info!(addr = bind_addr, "Starting gRPC server");
 
-    Server::builder()
+    let mut builder = Server::builder();
+
+    if let Some(tls) = &config.tls {
+        let cert = fs::read_to_string(&tls.server_cert)?;
+        let key = fs::read_to_string(&tls.server_key)?;
+        let identity = Identity::from_pem(cert, key);
+        
+        let mut tls_config = ServerTlsConfig::new().identity(identity);
+        
+        // Emable mTLS by requiring client auth with the CA
+        let ca_pem = fs::read_to_string(&tls.ca_cert)?;
+        let client_ca = Certificate::from_pem(ca_pem);
+        tls_config = tls_config.client_ca_root(client_ca);
+
+        builder = builder.tls_config(tls_config)?;
+        tracing::info!("mTLS enabled for gRPC server");
+    }
+
+    builder
         .add_service(RaftServer::new(server))
         .serve(addr)
         .await?;

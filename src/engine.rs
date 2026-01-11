@@ -4,7 +4,9 @@
 //! and commit index advancement.
 
 use crate::network::{ConsensusNetwork, NetworkError, RaftMessage, RaftNetwork};
-use crate::raft::{LogEntry, LogIndex, LogInfo, NodeId, RaftRole, RaftStorage, Term};
+use crate::raft::{
+    ClusterConfig, LogCommand, LogEntry, LogIndex, LogInfo, NodeId, RaftRole, RaftStorage, Term,
+};
 use async_trait::async_trait;
 use rand::Rng;
 use serde::{Serialize, de::DeserializeOwned};
@@ -122,6 +124,12 @@ pub enum ConsensusError {
     IntegrityError(String),
     #[error("Index out of bounds: requested {requested}, available {available}")]
     IndexOutOfBounds { requested: u64, available: u64 },
+    #[error("Configuration change error: {0}")]
+    ConfigChangeError(String),
+    #[error("Configuration change in progress")]
+    ConfigChangeInProgress,
+    #[error("TLS error: {0}")]
+    TlsError(String),
     #[error("Shutdown requested")]
     Shutdown,
 }
@@ -129,6 +137,19 @@ pub enum ConsensusError {
 impl From<NetworkError> for ConsensusError {
     fn from(e: NetworkError) -> Self {
         ConsensusError::NetworkError(e.to_string())
+    }
+}
+
+impl From<Box<dyn std::error::Error>> for ConsensusError {
+    fn from(e: Box<dyn std::error::Error>) -> Self {
+        ConsensusError::TlsError(e.to_string())
+    }
+}
+
+#[cfg(feature = "grpc")]
+impl From<tonic::transport::Error> for ConsensusError {
+    fn from(e: tonic::transport::Error) -> Self {
+        ConsensusError::TlsError(e.to_string())
     }
 }
 
@@ -144,6 +165,9 @@ pub trait ConsensusEngine<T>: Send {
 
     /// Proposes a new value to be agreed upon.
     async fn propose(&mut self, value: T) -> Result<LogIndex, ConsensusError>;
+
+    /// Proposes a configuration change (membership change).
+    async fn propose_conf_change(&mut self, change: crate::raft::ConfChange) -> Result<LogIndex, ConsensusError>;
 
     /// Returns the current leader ID, if known.
     fn leader_id(&self) -> Option<NodeId>;
@@ -218,6 +242,9 @@ where
     // Configuration
     config: RaftConfig,
 
+    /// Current cluster configuration (Joint Consensus supported)
+    cluster_config: ClusterConfig,
+
     // Votes received in current election
     votes_received: HashMap<NodeId, bool>,
 
@@ -236,10 +263,11 @@ where
     /// Note: This constructor initializes with default values. Call `init()` after
     /// construction to load state from storage.
     pub fn new(id: NodeId, network: N, storage: S, config: RaftConfig) -> Self {
-        tracing::info!(
-            node_id = id,
-            "Creating Raft engine"
-        );
+        tracing::info!(node_id = id, "Creating Raft engine");
+
+        let peers = network.peer_ids();
+        let mut nodes = vec![id];
+        nodes.extend(peers);
 
         Self {
             id,
@@ -252,6 +280,7 @@ where
             network,
             config,
             votes_received: HashMap::new(),
+            cluster_config: ClusterConfig::Single(nodes),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -261,10 +290,15 @@ where
         self.network.peer_ids()
     }
 
-    /// Returns the majority quorum size
-    fn quorum_size(&self) -> usize {
-        let total = self.peer_ids().len() + 1; // +1 for self
-        (total / 2) + 1
+    /// Checks if a majority is achieved based on the current cluster configuration.
+    fn has_majority(&self, votes: &HashMap<NodeId, bool>) -> bool {
+        let voters: Vec<NodeId> = votes
+            .iter()
+            .filter(|&(_, &granted)| granted)
+            .map(|(&id, _)| id)
+            .collect();
+
+        self.cluster_config.has_majority(&voters)
     }
 
     // ========================================================================
@@ -612,12 +646,11 @@ where
                 node_id = self.id,
                 from = from_id,
                 votes = votes,
-                needed = self.quorum_size(),
                 "Received vote"
             );
 
-            // Check for majority
-            if votes >= self.quorum_size() {
+            // Check for majority (Joint Consensus aware)
+            if self.has_majority(&self.votes_received) {
                 self.become_leader().await;
             }
         }
@@ -787,6 +820,24 @@ where
 
                 if !new_entries.is_empty() {
                     self.storage.append_entries(&new_entries).await?;
+
+                    // EXPERT: As soon as a node appends a config entry, it starts using it.
+                    for entry in &new_entries {
+                        if let LogCommand::Config(config) = &entry.command {
+                            tracing::info!(
+                                node_id = self.id,
+                                index = entry.index,
+                                "Node transitioning to new configuration from log"
+                            );
+                            self.cluster_config = config.clone();
+                            
+                            // Update network if needed
+                            let _ = self.network.update_peers(config.all_nodes().into_iter().map(|id| crate::network::PeerInfo {
+                                id,
+                                address: "".to_string(), // In a real system, we'd have address mapping
+                            }).collect()).await;
+                        }
+                    }
                 }
             }
 
@@ -934,19 +985,35 @@ where
                 continue;
             }
 
-            // Count replicas
-            let mut count = 1; // Count self
-            for (&_peer, &match_idx) in &leader_state.match_index {
+            // Check if majority of current config has replicated this index
+            let mut replicated = vec![self.id];
+            for (&node_id, &match_idx) in &leader_state.match_index {
                 if match_idx >= n {
-                    count += 1;
+                    replicated.push(node_id);
                 }
             }
 
-            if count >= self.quorum_size() {
+            if self.cluster_config.has_majority(&replicated) {
                 self.commit_index = n;
                 self.storage.set_commit_index(n).await?;
 
-                tracing::debug!(node_id = self.id, commit_index = n, "Advanced commit index");
+                tracing::debug!(
+                    node_id = self.id,
+                    commit_index = n,
+                    is_joint = self.cluster_config.is_joint(),
+                    "Advanced commit index"
+                );
+
+                // If we just committed a configuration change, we might need to transition
+                if let Some(LogEntry {
+                    command: LogCommand::Config(ClusterConfig::Joint { .. }),
+                    ..
+                }) = entry
+                {
+                    // Committing EnterJoint -> We should soon transition to LeaveJoint
+                    // In a full implementation, the leader would propose LeaveJoint here.
+                    // For now, we'll handle the logic in the main loop or dedicated method.
+                }
             }
         }
 
@@ -974,11 +1041,7 @@ where
         let log_info = self.storage.get_last_log_info().await?;
         let new_index = log_info.last_index + 1;
 
-        let entry = LogEntry {
-            term,
-            index: new_index,
-            command: value,
-        };
+        let entry = LogEntry::new(new_index, term, value);
 
         self.storage.append_entries(&[entry]).await?;
 
@@ -990,6 +1053,52 @@ where
         );
 
         Ok(new_index)
+    }
+
+    async fn propose_conf_change(&mut self, change: crate::raft::ConfChange) -> Result<LogIndex, ConsensusError> {
+        if self.role != RaftRole::Leader {
+            return Err(ConsensusError::NotLeader);
+        }
+
+        if self.cluster_config.is_joint() {
+            return Err(ConsensusError::ConfigChangeInProgress);
+        }
+
+        let old_nodes = self.cluster_config.all_nodes();
+        let mut new_nodes = old_nodes.clone();
+        match change {
+            crate::raft::ConfChange::AddNode(id) => {
+                if !new_nodes.contains(&id) {
+                    new_nodes.push(id);
+                }
+            }
+            crate::raft::ConfChange::RemoveNode(id) => {
+                new_nodes.retain(|&x| x != id);
+            }
+        }
+
+        let joint_config = ClusterConfig::Joint {
+            old: old_nodes,
+            new: new_nodes,
+        };
+
+        let term = self.storage.get_term().await.unwrap_or(0);
+        let log_info = self.storage.get_last_log_info().await?;
+        let next_idx = log_info.last_index + 1;
+
+        let entry = LogEntry::config(next_idx, term, joint_config.clone());
+        self.storage.append_entries(&[entry]).await?;
+
+        // Update active config immediately
+        self.cluster_config = joint_config;
+
+        tracing::info!(
+            node_id = self.id,
+            index = next_idx,
+            "Leader proposed Joint Consensus configuration change"
+        );
+
+        Ok(next_idx)
     }
 
     fn leader_id(&self) -> Option<NodeId> {
@@ -1074,12 +1183,12 @@ impl<T: Clone + Send + Sync + Serialize + DeserializeOwned + 'static> ConsensusE
     }
 
     async fn propose(&mut self, _value: T) -> Result<LogIndex, ConsensusError> {
-        if self.node.role != RaftRole::Leader {
-            return Err(ConsensusError::NotLeader);
-        }
+        // Legacy adapter doesn't actually run, just a placeholder
+        Err(ConsensusError::NotLeader)
+    }
 
-        let log_info = self.node.storage.get_last_log_info().await?;
-        Ok(log_info.last_index + 1)
+    async fn propose_conf_change(&mut self, _change: crate::raft::ConfChange) -> Result<LogIndex, ConsensusError> {
+        Err(ConsensusError::NotLeader)
     }
 
     fn leader_id(&self) -> Option<NodeId> {

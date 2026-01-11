@@ -245,8 +245,15 @@ where
             let next_index = self.last_applied + 1;
 
             if let Some(entry) = self.storage.get_log_entry(next_index).await? {
-                let output = self.state_machine.apply(entry.command);
-                outputs.push((next_index, output));
+                match entry.command {
+                    crate::raft::LogCommand::App(cmd) => {
+                        let output = self.state_machine.apply(cmd);
+                        outputs.push((next_index, output));
+                    }
+                    crate::raft::LogCommand::Config(_) | crate::raft::LogCommand::NoOp => {
+                        // Configuration changes and NoOps are handled by the consensus engine
+                    }
+                }
                 self.last_applied = next_index;
 
                 tracing::debug!(

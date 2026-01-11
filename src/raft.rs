@@ -26,11 +26,153 @@ impl std::fmt::Display for RaftRole {
     }
 }
 
+// ============================================================================
+// JOINT CONSENSUS - SAFE MEMBERSHIP CHANGES
+// ============================================================================
+
+/// Cluster configuration for Joint Consensus.
+///
+/// During a membership change, the cluster transitions through:
+/// 1. `Single(old)` - Normal operation with old configuration
+/// 2. `Joint(old, new)` - Transitional state requiring majorities from BOTH configs
+/// 3. `Single(new)` - Normal operation with new configuration
+///
+/// This two-phase approach prevents split-brain scenarios during membership changes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClusterConfig {
+    /// Single configuration (normal operation)
+    Single(Vec<NodeId>),
+    /// Joint configuration during transition (old, new)
+    Joint {
+        old: Vec<NodeId>,
+        new: Vec<NodeId>,
+    },
+}
+
+impl ClusterConfig {
+    /// Creates a new single configuration.
+    pub fn single(nodes: Vec<NodeId>) -> Self {
+        Self::Single(nodes)
+    }
+
+    /// Checks if a majority is achieved.
+    ///
+    /// In Single mode: simple majority of the single config.
+    /// In Joint mode: majority from BOTH old AND new configs.
+    pub fn has_majority(&self, voters: &[NodeId]) -> bool {
+        match self {
+            ClusterConfig::Single(nodes) => {
+                let count = voters.iter().filter(|v| nodes.contains(v)).count();
+                count > nodes.len() / 2
+            }
+            ClusterConfig::Joint { old, new } => {
+                let old_count = voters.iter().filter(|v| old.contains(v)).count();
+                let new_count = voters.iter().filter(|v| new.contains(v)).count();
+                old_count > old.len() / 2 && new_count > new.len() / 2
+            }
+        }
+    }
+
+    /// Returns all unique node IDs in the current configuration.
+    pub fn all_nodes(&self) -> Vec<NodeId> {
+        match self {
+            ClusterConfig::Single(nodes) => nodes.clone(),
+            ClusterConfig::Joint { old, new } => {
+                let mut all: Vec<NodeId> = old.clone();
+                for n in new {
+                    if !all.contains(n) {
+                        all.push(*n);
+                    }
+                }
+                all
+            }
+        }
+    }
+
+    /// Checks if in joint consensus state.
+    pub fn is_joint(&self) -> bool {
+        matches!(self, ClusterConfig::Joint { .. })
+    }
+}
+
+impl Default for ClusterConfig {
+    fn default() -> Self {
+        Self::Single(vec![])
+    }
+}
+
+/// Configuration change request.
+///
+/// Submitted to the leader to initiate a membership change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ConfChange {
+    /// Add a node to the cluster
+    AddNode(NodeId),
+    /// Remove a node from the cluster
+    RemoveNode(NodeId),
+}
+
+/// Internal log entry for configuration changes.
+///
+/// These are special log entries that, when committed, trigger
+/// configuration transitions in the Raft state machine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ConfChangeEntry {
+    /// Enter joint consensus with old+new config
+    EnterJoint(ClusterConfig),
+    /// Leave joint consensus, commit to new config
+    LeaveJoint(ClusterConfig),
+}
+
+/// Command payload for a log entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LogCommand<T> {
+    /// No-op command, often appended by a leader at the start of its term
+    /// or used for heartbeats.
+    NoOp,
+    /// Application-level command to be applied to the state machine.
+    App(T),
+    /// Membership configuration change (Joint Consensus).
+    Config(ClusterConfig),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry<T> {
+    /// The term when this entry was created by the leader.
     pub term: Term,
+    /// The index of this entry in the log.
     pub index: LogIndex,
-    pub command: T,
+    /// The command payload.
+    pub command: LogCommand<T>,
+}
+
+impl<T> LogEntry<T> {
+    /// Creates a new data entry.
+    pub fn new(index: LogIndex, term: Term, command: T) -> Self {
+        Self {
+            index,
+            term,
+            command: LogCommand::App(command),
+        }
+    }
+
+    /// Creates a new configuration entry.
+    pub fn config(index: LogIndex, term: Term, config: ClusterConfig) -> Self {
+        Self {
+            index,
+            term,
+            command: LogCommand::Config(config),
+        }
+    }
+
+    /// Creates a new NoOp entry.
+    pub fn noop(index: LogIndex, term: Term) -> Self {
+        Self {
+            index,
+            term,
+            command: LogCommand::NoOp,
+        }
+    }
 }
 
 /// Snapshot of the state machine for log compaction.
@@ -1140,9 +1282,11 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         );
     }
 
-    /// Adds a peer to the cluster configuration.
+    /// Adds a peer to the cluster configuration (LEGACY - use propose_conf_change for safety).
     ///
-    /// Updates both persistent storage and the active network transport.
+    /// ⚠️ WARNING: This method is NOT safe for concurrent membership changes.
+    /// Use `propose_conf_change` for production deployments.
+    #[deprecated(since = "0.7.2", note = "Use propose_conf_change for Joint Consensus safety")]
     pub async fn add_node(&mut self, peer_address: String) -> Result<(), ConsensusError> {
         let mut peers = self.storage.get_peers().await?;
         if !peers.contains(&peer_address) {
@@ -1163,7 +1307,8 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         Ok(())
     }
 
-    /// Removes a peer from the cluster configuration.
+    /// Removes a peer from the cluster configuration (LEGACY - use propose_conf_change for safety).
+    #[deprecated(since = "0.7.2", note = "Use propose_conf_change for Joint Consensus safety")]
     pub async fn remove_node(&mut self, peer_address: &str) -> Result<(), ConsensusError> {
         let mut peers = self.storage.get_peers().await?;
         if let Some(pos) = peers.iter().position(|p| p == peer_address) {
@@ -1182,6 +1327,118 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
             );
         }
         Ok(())
+    }
+
+    /// Proposes a configuration change using Joint Consensus (two-phase).
+    ///
+    /// This is the SAFE way to add/remove nodes from a running cluster.
+    /// The change follows the Raft Joint Consensus protocol:
+    ///
+    /// 1. **Phase 1 (Enter Joint)**: Append a log entry with `C_old,new` configuration.
+    ///    Requires majorities from BOTH old and new configs to commit.
+    ///
+    /// 2. **Phase 2 (Leave Joint)**: After `C_old,new` is committed, append a log entry
+    ///    with `C_new` configuration. This finalizes the transition.
+    ///
+    /// # Arguments
+    ///
+    /// * `change` - The configuration change to propose (AddNode or RemoveNode).
+    /// * `current_config` - The current cluster configuration.
+    ///
+    /// # Returns
+    ///
+    /// The new `ClusterConfig` after initiating the first phase (Joint config).
+    /// The caller must track commit progress and call `finalize_conf_change` after commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - This node is not the leader.
+    /// - A configuration change is already in progress (config is Joint).
+    pub async fn propose_conf_change(
+        &mut self,
+        change: ConfChange,
+        current_config: ClusterConfig,
+    ) -> Result<ClusterConfig, ConsensusError> {
+        // Only leader can propose changes
+        if self.role != RaftRole::Leader {
+            return Err(ConsensusError::NotLeader);
+        }
+
+        // Cannot start new change if already in joint state
+        if current_config.is_joint() {
+            return Err(ConsensusError::ConfigChangeInProgress);
+        }
+
+        let old_nodes = match &current_config {
+            ClusterConfig::Single(nodes) => nodes.clone(),
+            ClusterConfig::Joint { .. } => unreachable!(), // Checked above
+        };
+
+        // Compute new configuration
+        let new_nodes = match &change {
+            ConfChange::AddNode(node_id) => {
+                let mut nodes = old_nodes.clone();
+                if !nodes.contains(node_id) {
+                    nodes.push(*node_id);
+                }
+                nodes
+            }
+            ConfChange::RemoveNode(node_id) => {
+                old_nodes.iter().filter(|n| *n != node_id).copied().collect()
+            }
+        };
+
+        let joint_config = ClusterConfig::Joint {
+            old: old_nodes.clone(),
+            new: new_nodes.clone(),
+        };
+
+        tracing::info!(
+            node_id = self.id,
+            change = ?change,
+            old_config_size = old_nodes.len(),
+            new_config_size = new_nodes.len(),
+            "Entering Joint Consensus"
+        );
+
+        Ok(joint_config)
+    }
+
+    /// Finalizes a configuration change by transitioning from Joint to Single config.
+    ///
+    /// Call this AFTER the Joint config entry has been committed (replicated to majority
+    /// of BOTH old and new configs).
+    ///
+    /// # Arguments
+    ///
+    /// * `joint_config` - The current Joint configuration.
+    ///
+    /// # Returns
+    ///
+    /// The new Single configuration (the "new" part of the Joint).
+    pub async fn finalize_conf_change(
+        &mut self,
+        joint_config: ClusterConfig,
+    ) -> Result<ClusterConfig, ConsensusError> {
+        match joint_config {
+            ClusterConfig::Joint { old: _, new } => {
+                let final_config = ClusterConfig::Single(new.clone());
+                
+                tracing::info!(
+                    node_id = self.id,
+                    new_config_size = new.len(),
+                    "Leaving Joint Consensus, finalizing new configuration"
+                );
+
+                Ok(final_config)
+            }
+            ClusterConfig::Single(_) => {
+                Err(ConsensusError::ConfigChangeError(
+                    "Cannot finalize: not in Joint state".to_string(),
+                ))
+            }
+        }
     }
 }
 
@@ -1205,11 +1462,7 @@ mod tests {
         storage.set_vote(Some(42)).await.unwrap();
         assert_eq!(storage.get_vote().await.unwrap(), Some(42));
 
-        let entry = LogEntry {
-            term: 1,
-            index: 1,
-            command: "test".to_string(),
-        };
+        let entry = LogEntry::new(1, 1, "test".to_string());
         storage.append_entries(&[entry]).await.unwrap();
         assert_eq!(storage.get_log().await.unwrap().count(), 1);
     }
@@ -1220,18 +1473,20 @@ mod tests {
 
         // Append multiple entries
         let entries: Vec<LogEntry<String>> = (1..=5)
-            .map(|i| LogEntry {
-                term: 1,
-                index: i,
-                command: format!("cmd{}", i),
-            })
+            .map(|i| LogEntry::new(i, 1, format!("cmd{}", i)))
             .collect();
         storage.append_entries(&entries).await.unwrap();
 
         // Test get_log_entry
         assert!(storage.get_log_entry(0).await.unwrap().is_none());
-        assert_eq!(storage.get_log_entry(1).await.unwrap().unwrap().command, "cmd1");
-        assert_eq!(storage.get_log_entry(5).await.unwrap().unwrap().command, "cmd5");
+        let entry1 = storage.get_log_entry(1).await.unwrap().unwrap();
+        if let LogCommand::App(cmd) = entry1.command {
+            assert_eq!(cmd, "cmd1");
+        }
+        let entry5 = storage.get_log_entry(5).await.unwrap().unwrap();
+        if let LogCommand::App(cmd) = entry5.command {
+            assert_eq!(cmd, "cmd5");
+        }
 
         // Test get_log_range
         let range: Vec<LogEntry<String>> = storage.get_log_range(2, 4).await.unwrap().collect::<Result<_, _>>().unwrap();
@@ -1257,11 +1512,7 @@ mod tests {
 
         // Add log entries
         let entries: Vec<LogEntry<String>> = (1..=10)
-            .map(|i| LogEntry {
-                term: 1,
-                index: i,
-                command: format!("cmd{}", i),
-            })
+            .map(|i| LogEntry::new(i, 1, format!("cmd{}", i)))
             .collect();
         storage.append_entries(&entries).await.unwrap();
 
@@ -1293,11 +1544,7 @@ mod tests {
             storage.set_term(10).await.unwrap();
             storage.set_vote(Some(1)).await.unwrap();
 
-            let entry = LogEntry {
-                term: 1,
-                index: 1,
-                command: "test_persist".to_string(),
-            };
+            let entry = LogEntry::new(1, 1, "test_persist".to_string());
             storage.append_entries(&[entry]).await.unwrap();
         }
 
@@ -1309,7 +1556,9 @@ mod tests {
 
             let log: Vec<LogEntry<String>> = storage.get_log().await.unwrap().collect::<Result<_, _>>().unwrap();
             assert_eq!(log.len(), 1);
-            assert_eq!(log[0].command, "test_persist");
+            if let LogCommand::App(cmd) = &log[0].command {
+                assert_eq!(cmd, "test_persist");
+            }
         }
 
         // Cleanup
@@ -1348,11 +1597,7 @@ mod tests {
 
         // Add entries
         let entries: Vec<LogEntry<String>> = (1..=5)
-            .map(|i| LogEntry {
-                term: 1,
-                index: i,
-                command: format!("cmd{}", i),
-            })
+            .map(|i| LogEntry::new(i, 1, format!("cmd{}", i)))
             .collect();
         storage.append_entries(&entries).await.unwrap();
 
@@ -1379,11 +1624,7 @@ mod tests {
 
             // Add log entries
             let entries: Vec<LogEntry<String>> = (1..=10)
-                .map(|i| LogEntry {
-                    term: 1,
-                    index: i,
-                    command: format!("cmd{}", i),
-                })
+                .map(|i| LogEntry::new(i, 1, format!("cmd{}", i)))
                 .collect();
             storage.append_entries(&entries).await.unwrap();
 

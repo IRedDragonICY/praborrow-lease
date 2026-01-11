@@ -5,7 +5,7 @@
 
 use crate::engine::RaftConfig;
 use crate::network::RaftMessage;
-use crate::raft::{InMemoryStorage, LogEntry, NodeId, RaftStorage};
+use crate::raft::{InMemoryStorage, LogCommand, LogEntry, NodeId, RaftStorage};
 use crate::state_machine::{KeyValueStateMachine, KvCommand, ReplicatedStateMachine};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -197,21 +197,9 @@ mod tests {
 
         // Leader appends entries
         let entries = vec![
-            LogEntry {
-                term: 1,
-                index: 1,
-                command: "cmd1".to_string(),
-            },
-            LogEntry {
-                term: 1,
-                index: 2,
-                command: "cmd2".to_string(),
-            },
-            LogEntry {
-                term: 1,
-                index: 3,
-                command: "cmd3".to_string(),
-            },
+            LogEntry::new(1, 1, "cmd1".to_string()),
+            LogEntry::new(2, 1, "cmd2".to_string()),
+            LogEntry::new(3, 1, "cmd3".to_string()),
         ];
         leader_storage.append_entries(&entries).await.unwrap();
 
@@ -238,10 +226,12 @@ mod tests {
 
         // Verify replication
         assert_eq!(follower_storage.get_log().await.unwrap().count(), 3);
-        assert_eq!(
-            follower_storage.get_log_entry(2).await.unwrap().unwrap().command,
-            "cmd2"
-        );
+        let entry = follower_storage.get_log_entry(2).await.unwrap().unwrap();
+        if let LogCommand::App(cmd) = entry.command {
+            assert_eq!(cmd, "cmd2");
+        } else {
+            panic!("Expected App command");
+        }
     }
 
     #[tokio::test]
@@ -250,16 +240,8 @@ mod tests {
 
         // Append entries
         let entries = vec![
-            LogEntry {
-                term: 1,
-                index: 1,
-                command: "cmd1".to_string(),
-            },
-            LogEntry {
-                term: 1,
-                index: 2,
-                command: "cmd2".to_string(),
-            },
+            LogEntry::new(1, 1, "cmd1".to_string()),
+            LogEntry::new(2, 1, "cmd2".to_string()),
         ];
         storage.append_entries(&entries).await.unwrap();
 
@@ -287,36 +269,16 @@ mod tests {
 
         // Follower has conflicting entries
         let old_entries = vec![
-            LogEntry {
-                term: 1,
-                index: 1,
-                command: "old1".to_string(),
-            },
-            LogEntry {
-                term: 1,
-                index: 2,
-                command: "old2".to_string(),
-            },
-            LogEntry {
-                term: 2,
-                index: 3,
-                command: "conflict".to_string(),
-            },
+            LogEntry::new(1, 1, "old1".to_string()),
+            LogEntry::new(2, 1, "old2".to_string()),
+            LogEntry::new(3, 2, "conflict".to_string()),
         ];
         storage.append_entries(&old_entries).await.unwrap();
 
         // Leader sends entries with different term at index 3
         let new_entries = vec![
-            LogEntry {
-                term: 3,
-                index: 3,
-                command: "new3".to_string(),
-            },
-            LogEntry {
-                term: 3,
-                index: 4,
-                command: "new4".to_string(),
-            },
+            LogEntry::new(3, 3, "new3".to_string()),
+            LogEntry::new(4, 3, "new4".to_string()),
         ];
 
         // Check for conflict at index 3
@@ -331,7 +293,12 @@ mod tests {
 
         // Verify
         assert_eq!(storage.get_log().await.unwrap().count(), 4);
-        assert_eq!(storage.get_log_entry(3).await.unwrap().unwrap().command, "new3");
+        let entry = storage.get_log_entry(3).await.unwrap().unwrap();
+        if let LogCommand::App(cmd) = entry.command {
+            assert_eq!(cmd, "new3");
+        } else {
+            panic!("Expected App command");
+        }
     }
 
     #[tokio::test]
@@ -341,22 +308,22 @@ mod tests {
 
         // Append commands to log
         let entries = vec![
-            LogEntry {
-                term: 1,
-                index: 1,
-                command: KvCommand::Set {
+            LogEntry::new(
+                1,
+                1,
+                KvCommand::Set {
                     key: "a".to_string(),
                     value: b"1".to_vec(),
                 },
-            },
-            LogEntry {
-                term: 1,
-                index: 2,
-                command: KvCommand::Set {
+            ),
+            LogEntry::new(
+                2,
+                1,
+                KvCommand::Set {
                     key: "b".to_string(),
                     value: b"2".to_vec(),
                 },
-            },
+            ),
         ];
         storage.append_entries(&entries).await.unwrap();
 
