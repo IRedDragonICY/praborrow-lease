@@ -117,7 +117,7 @@ pub trait ConsensusEngine<T>: Send {
     fn is_leader(&self) -> bool;
 
     /// Returns the current term.
-    fn current_term(&self) -> Term;
+    async fn current_term(&self) -> Term;
 
     /// Returns the commit index.
     fn commit_index(&self) -> LogIndex;
@@ -197,12 +197,12 @@ where
     S: RaftStorage<T>,
 {
     /// Creates a new Raft engine.
+    ///
+    /// Note: This constructor initializes with default values. Call `init()` after
+    /// construction to load state from storage.
     pub fn new(id: NodeId, network: N, storage: S, config: RaftConfig) -> Self {
-        let commit_index = storage.get_commit_index().unwrap_or(0);
-
         tracing::info!(
             node_id = id,
-            commit_index = commit_index,
             "Creating Raft engine"
         );
 
@@ -210,7 +210,7 @@ where
             id,
             storage,
             role: RaftRole::Follower,
-            commit_index,
+            commit_index: 0,
             _last_applied: 0,
             leader_state: None,
             current_leader: None,
@@ -236,14 +236,14 @@ where
     // ROLE TRANSITIONS
     // ========================================================================
 
-    fn become_follower(&mut self, term: Term) {
+    async fn become_follower(&mut self, term: Term) {
         let old_role = self.role.clone();
         self.role = RaftRole::Follower;
         self.leader_state = None;
         self.votes_received.clear();
 
-        let _ = self.storage.set_term(term);
-        let _ = self.storage.set_vote(None);
+        let _ = self.storage.set_term(term).await;
+        let _ = self.storage.set_vote(None).await;
 
         if old_role != RaftRole::Follower {
             tracing::info!(
@@ -255,8 +255,8 @@ where
         }
     }
 
-    fn become_candidate(&mut self) {
-        let current_term = self.storage.get_term().unwrap_or(0);
+    async fn become_candidate(&mut self) {
+        let current_term = self.storage.get_term().await.unwrap_or(0);
         let new_term = current_term + 1;
 
         self.role = RaftRole::Candidate;
@@ -265,7 +265,7 @@ where
         self.votes_received.clear();
 
         // Vote for self
-        let _ = self.storage.set_term_and_vote(new_term, Some(self.id));
+        let _ = self.storage.set_term_and_vote(new_term, Some(self.id)).await;
         self.votes_received.insert(self.id, true);
 
         tracing::info!(
@@ -275,9 +275,9 @@ where
         );
     }
 
-    fn become_leader(&mut self) {
-        let term = self.storage.get_term().unwrap_or(0);
-        let log_info = self.storage.get_last_log_info().unwrap_or_default();
+    async fn become_leader(&mut self) {
+        let term = self.storage.get_term().await.unwrap_or(0);
+        let log_info = self.storage.get_last_log_info().await.unwrap_or_default();
 
         self.role = RaftRole::Leader;
         self.current_leader = Some(self.id);
@@ -326,7 +326,7 @@ where
                     timeout_ms = timeout.as_millis(),
                     "Election timeout, becoming candidate"
                 );
-                self.become_candidate();
+                self.become_candidate().await;
             }
         }
 
@@ -335,8 +335,8 @@ where
 
     /// Candidate loop: request votes, collect responses
     async fn run_candidate(&mut self) -> Result<(), ConsensusError> {
-        let term = self.storage.get_term().unwrap_or(0);
-        let log_info = self.storage.get_last_log_info().unwrap_or_default();
+        let term = self.storage.get_term().await.unwrap_or(0);
+        let log_info = self.storage.get_last_log_info().await.unwrap_or_default();
 
         // Send RequestVote to all peers
         for peer_id in self.peer_ids() {
@@ -384,7 +384,7 @@ where
                 _ = tokio::time::sleep(remaining) => {
                     // Election timeout - start new election
                     tracing::debug!(node_id = self.id, "Election timeout, restarting");
-                    self.become_candidate();
+                    self.become_candidate().await;
                     return Ok(());
                 }
             }
@@ -415,7 +415,7 @@ where
         }
 
         // Advance commit index if possible
-        self.advance_commit_index()?;
+        self.advance_commit_index().await?;
 
         Ok(())
     }
@@ -441,7 +441,7 @@ where
                 vote_granted,
                 from_id,
             } => {
-                self.handle_request_vote_response(term, vote_granted, from_id)?;
+                self.handle_request_vote_response(term, vote_granted, from_id).await?;
             }
 
             RaftMessage::AppendEntries {
@@ -469,7 +469,7 @@ where
                 match_index,
                 from_id,
             } => {
-                self.handle_append_entries_response(term, success, match_index, from_id)?;
+                self.handle_append_entries_response(term, success, match_index, from_id).await?;
             }
 
             RaftMessage::InstallSnapshot {
@@ -487,8 +487,8 @@ where
                 from_id: _,
             } => {
                 // Handle snapshot response
-                if term > self.storage.get_term().unwrap_or(0) {
-                    self.become_follower(term);
+                if term > self.storage.get_term().await.unwrap_or(0) {
+                    self.become_follower(term).await;
                 }
             }
         }
@@ -507,16 +507,16 @@ where
         last_log_index: LogIndex,
         last_log_term: Term,
     ) -> Result<(), ConsensusError> {
-        let current_term = self.storage.get_term().unwrap_or(0);
+        let current_term = self.storage.get_term().await.unwrap_or(0);
 
         // If term > currentTerm, become follower
         if term > current_term {
-            self.become_follower(term);
+            self.become_follower(term).await;
         }
 
-        let current_term = self.storage.get_term().unwrap_or(0);
-        let voted_for = self.storage.get_vote().unwrap_or(None);
-        let our_log_info = self.storage.get_last_log_info().unwrap_or_default();
+        let current_term = self.storage.get_term().await.unwrap_or(0);
+        let voted_for = self.storage.get_vote().await.unwrap_or(None);
+        let our_log_info = self.storage.get_last_log_info().await.unwrap_or_default();
 
         // Grant vote if:
         // 1. term >= currentTerm
@@ -527,7 +527,7 @@ where
             && self.is_log_up_to_date(last_log_index, last_log_term, &our_log_info);
 
         if vote_granted {
-            let _ = self.storage.set_vote(Some(candidate_id));
+            let _ = self.storage.set_vote(Some(candidate_id)).await;
             tracing::debug!(
                 node_id = self.id,
                 candidate = candidate_id,
@@ -548,17 +548,17 @@ where
         Ok(())
     }
 
-    fn handle_request_vote_response(
+    async fn handle_request_vote_response(
         &mut self,
         term: Term,
         vote_granted: bool,
         from_id: NodeId,
     ) -> Result<(), ConsensusError> {
-        let current_term = self.storage.get_term().unwrap_or(0);
+        let current_term = self.storage.get_term().await.unwrap_or(0);
 
         // If response term > our term, become follower
         if term > current_term {
-            self.become_follower(term);
+            self.become_follower(term).await;
             return Ok(());
         }
 
@@ -583,7 +583,7 @@ where
 
             // Check for majority
             if votes >= self.quorum_size() {
-                self.become_leader();
+                self.become_leader().await;
             }
         }
 
@@ -614,7 +614,7 @@ where
     // ========================================================================
 
     async fn send_append_entries_to_all(&mut self) -> Result<(), ConsensusError> {
-        let term = self.storage.get_term().unwrap_or(0);
+        let term = self.storage.get_term().await.unwrap_or(0);
         let peers = self.peer_ids();
 
         for peer_id in peers {
@@ -644,16 +644,16 @@ where
             0
         } else {
             self.storage
-                .get_log_entry(prev_log_index)?
+                .get_log_entry(prev_log_index).await?
                 .map(|e| e.term)
                 .unwrap_or(0)
         };
 
         // Get entries to send
-        let last_log_info = self.storage.get_last_log_info()?;
+        let last_log_info = self.storage.get_last_log_info().await?;
         let end_idx =
             (next_idx + self.config.max_entries_per_rpc as u64).min(last_log_info.last_index + 1);
-        let entries = self.storage.get_log_range(next_idx, end_idx)?;
+        let entries = self.storage.get_log_range(next_idx, end_idx).await?;
 
         self.network
             .send_append_entries(
@@ -679,7 +679,7 @@ where
         entries: Vec<LogEntry<T>>,
         leader_commit: LogIndex,
     ) -> Result<(), ConsensusError> {
-        let current_term = self.storage.get_term().unwrap_or(0);
+        let current_term = self.storage.get_term().await.unwrap_or(0);
 
         // Reply false if term < currentTerm (§5.1)
         if term < current_term {
@@ -695,7 +695,7 @@ where
 
         // If term > currentTerm, become follower
         if term > current_term {
-            self.become_follower(term);
+            self.become_follower(term).await;
         }
 
         // Reset election timer (we received valid AppendEntries from leader)
@@ -703,11 +703,11 @@ where
 
         // If candidate, step down
         if self.role == RaftRole::Candidate {
-            self.become_follower(term);
+            self.become_follower(term).await;
         }
 
         // Check log consistency
-        let our_log_info = self.storage.get_last_log_info()?;
+        let our_log_info = self.storage.get_last_log_info().await?;
 
         let success = if prev_log_index == 0 {
             true
@@ -716,7 +716,7 @@ where
         } else {
             // Check if we have the entry at prev_log_index with matching term
             self.storage
-                .get_log_entry(prev_log_index)?
+                .get_log_entry(prev_log_index).await?
                 .map(|e| e.term == prev_log_term)
                 .unwrap_or(false)
         };
@@ -730,45 +730,45 @@ where
                 // Check for conflicts
                 // Check for conflicts
                 for entry in &entries {
-                    let conflict = match self.storage.get_log_entry(entry.index)? {
+                    let conflict = match self.storage.get_log_entry(entry.index).await? {
                         Some(existing) => existing.term != entry.term,
                         None => false,
                     };
 
                     if conflict {
                         // Conflict - delete this and all following
-                        self.storage.truncate_log(entry.index)?;
+                        self.storage.truncate_log(entry.index).await?;
                         break;
                     }
                 }
 
                 // Append entries not already in log
-                let log_info = self.storage.get_last_log_info()?;
+                let log_info = self.storage.get_last_log_info().await?;
                 let new_entries: Vec<_> = entries
                     .into_iter()
                     .filter(|e| e.index > log_info.last_index)
                     .collect();
 
                 if !new_entries.is_empty() {
-                    self.storage.append_entries(&new_entries)?;
+                    self.storage.append_entries(&new_entries).await?;
                 }
             }
 
             // Update commit index
-            let our_log_info = self.storage.get_last_log_info()?;
+            let our_log_info = self.storage.get_last_log_info().await?;
             if leader_commit > self.commit_index {
                 self.commit_index = leader_commit.min(our_log_info.last_index);
-                self.storage.set_commit_index(self.commit_index)?;
+                self.storage.set_commit_index(self.commit_index).await?;
             }
 
-            self.storage.get_last_log_info()?.last_index
+            self.storage.get_last_log_info().await?.last_index
         } else {
             0
         };
 
         // Send response
         let response = RaftMessage::AppendEntriesResponse {
-            term: self.storage.get_term().unwrap_or(0),
+            term: self.storage.get_term().await.unwrap_or(0),
             success,
             match_index,
             from_id: self.id,
@@ -779,18 +779,18 @@ where
         Ok(())
     }
 
-    fn handle_append_entries_response(
+    async fn handle_append_entries_response(
         &mut self,
         term: Term,
         success: bool,
         match_index: LogIndex,
         from_id: NodeId,
     ) -> Result<(), ConsensusError> {
-        let current_term = self.storage.get_term().unwrap_or(0);
+        let current_term = self.storage.get_term().await.unwrap_or(0);
 
         // If term > currentTerm, become follower
         if term > current_term {
-            self.become_follower(term);
+            self.become_follower(term).await;
             return Ok(());
         }
 
@@ -831,7 +831,7 @@ where
         leader_id: NodeId,
         snapshot: crate::raft::Snapshot<T>,
     ) -> Result<(), ConsensusError> {
-        let current_term = self.storage.get_term().unwrap_or(0);
+        let current_term = self.storage.get_term().await.unwrap_or(0);
 
         if term < current_term {
             let response = RaftMessage::InstallSnapshotResponse {
@@ -844,22 +844,22 @@ where
         }
 
         if term > current_term {
-            self.become_follower(term);
+            self.become_follower(term).await;
         }
 
         self.current_leader = Some(leader_id);
 
         // Install the snapshot
-        self.storage.install_snapshot(snapshot.clone())?;
+        self.storage.install_snapshot(snapshot.clone()).await?;
 
         // Update commit index
         if snapshot.last_included_index > self.commit_index {
             self.commit_index = snapshot.last_included_index;
-            self.storage.set_commit_index(self.commit_index)?;
+            self.storage.set_commit_index(self.commit_index).await?;
         }
 
         let response = RaftMessage::InstallSnapshotResponse {
-            term: self.storage.get_term().unwrap_or(0),
+            term: self.storage.get_term().await.unwrap_or(0),
             success: true,
             from_id: self.id,
         };
@@ -873,7 +873,7 @@ where
     // COMMIT INDEX ADVANCEMENT
     // ========================================================================
 
-    fn advance_commit_index(&mut self) -> Result<(), ConsensusError> {
+    async fn advance_commit_index(&mut self) -> Result<(), ConsensusError> {
         if self.role != RaftRole::Leader {
             return Ok(());
         }
@@ -883,8 +883,8 @@ where
             .as_ref()
             .ok_or(ConsensusError::NotLeader)?;
 
-        let current_term = self.storage.get_term().unwrap_or(0);
-        let log_info = self.storage.get_last_log_info()?;
+        let current_term = self.storage.get_term().await.unwrap_or(0);
+        let log_info = self.storage.get_last_log_info().await?;
 
         // Find the highest N such that:
         // 1. N > commitIndex
@@ -893,7 +893,7 @@ where
 
         for n in (self.commit_index + 1)..=log_info.last_index {
             // Check if entry at N has current term
-            let entry = self.storage.get_log_entry(n)?;
+            let entry = self.storage.get_log_entry(n).await?;
             if entry.as_ref().map(|e| e.term) != Some(current_term) {
                 continue;
             }
@@ -908,7 +908,7 @@ where
 
             if count >= self.quorum_size() {
                 self.commit_index = n;
-                self.storage.set_commit_index(n)?;
+                self.storage.set_commit_index(n).await?;
 
                 tracing::debug!(node_id = self.id, commit_index = n, "Advanced commit index");
             }
@@ -934,8 +934,8 @@ where
             return Err(ConsensusError::NotLeader);
         }
 
-        let term = self.storage.get_term().unwrap_or(0);
-        let log_info = self.storage.get_last_log_info()?;
+        let term = self.storage.get_term().await.unwrap_or(0);
+        let log_info = self.storage.get_last_log_info().await?;
         let new_index = log_info.last_index + 1;
 
         let entry = LogEntry {
@@ -944,7 +944,7 @@ where
             command: value,
         };
 
-        self.storage.append_entries(&[entry])?;
+        self.storage.append_entries(&[entry]).await?;
 
         tracing::debug!(
             node_id = self.id,
@@ -964,8 +964,8 @@ where
         self.role == RaftRole::Leader
     }
 
-    fn current_term(&self) -> Term {
-        self.storage.get_term().unwrap_or(0)
+    async fn current_term(&self) -> Term {
+        self.storage.get_term().await.unwrap_or(0)
     }
 
     fn commit_index(&self) -> LogIndex {
@@ -1006,11 +1006,11 @@ impl ConsensusFactory {
 }
 
 /// Legacy adapter for backward compatibility with ConsensusNetwork trait
-struct LegacyRaftEngineAdapter<T> {
+struct LegacyRaftEngineAdapter<T: Send + Sync> {
     node: crate::raft::RaftNode<T>,
 }
 
-impl<T: Clone + Send + Serialize + DeserializeOwned + 'static> LegacyRaftEngineAdapter<T> {
+impl<T: Clone + Send + Sync + Serialize + DeserializeOwned + 'static> LegacyRaftEngineAdapter<T> {
     fn new(
         id: NodeId,
         network: Box<dyn ConsensusNetwork>,
@@ -1042,7 +1042,7 @@ impl<T: Clone + Send + Sync + Serialize + DeserializeOwned + 'static> ConsensusE
             return Err(ConsensusError::NotLeader);
         }
 
-        let log_info = self.node.storage.get_last_log_info()?;
+        let log_info = self.node.storage.get_last_log_info().await?;
         Ok(log_info.last_index + 1)
     }
 
@@ -1058,8 +1058,8 @@ impl<T: Clone + Send + Sync + Serialize + DeserializeOwned + 'static> ConsensusE
         self.node.role == RaftRole::Leader
     }
 
-    fn current_term(&self) -> Term {
-        self.node.storage.get_term().unwrap_or(0)
+    async fn current_term(&self) -> Term {
+        self.node.storage.get_term().await.unwrap_or(0)
     }
 
     fn commit_index(&self) -> LogIndex {

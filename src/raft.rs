@@ -1,5 +1,6 @@
 use crate::engine::ConsensusError;
 use crate::network::ConsensusNetwork;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::path::PathBuf;
@@ -107,90 +108,93 @@ pub struct LogInfo {
 ///
 /// All operations that modify state must be atomic and durable.
 /// Implementations must handle crash recovery correctly.
-pub trait RaftStorage<T>: Send {
+///
+/// All methods are async to support non-blocking I/O backends (e.g., remote databases).
+#[async_trait]
+pub trait RaftStorage<T>: Send + Sync {
     // ===== Core Log Operations =====
 
     /// Appends entries to the log.
     ///
     /// Entries are appended atomically. Either all entries are persisted
     /// or none are.
-    fn append_entries(&mut self, entries: &[LogEntry<T>]) -> Result<(), ConsensusError>;
+    async fn append_entries(&mut self, entries: &[LogEntry<T>]) -> Result<(), ConsensusError>;
 
     /// Gets a single log entry by index.
     ///
     /// Returns `None` if the index is out of bounds or has been compacted.
-    fn get_log_entry(&self, index: LogIndex) -> Result<Option<LogEntry<T>>, ConsensusError>;
+    async fn get_log_entry(&self, index: LogIndex) -> Result<Option<LogEntry<T>>, ConsensusError>;
 
     /// Gets a range of log entries [start, end).
     ///
     /// Returns empty vec if range is invalid or compacted.
-    fn get_log_range(
+    async fn get_log_range(
         &self,
         start: LogIndex,
         end: LogIndex,
     ) -> Result<Vec<LogEntry<T>>, ConsensusError>;
 
     /// Gets all log entries.
-    fn get_log(&self) -> Result<Vec<LogEntry<T>>, ConsensusError>;
+    async fn get_log(&self) -> Result<Vec<LogEntry<T>>, ConsensusError>;
 
     /// Gets the last log index and term.
     ///
     /// Returns (0, 0) if log is empty.
-    fn get_last_log_info(&self) -> Result<LogInfo, ConsensusError>;
+    async fn get_last_log_info(&self) -> Result<LogInfo, ConsensusError>;
 
     /// Truncates the log at the given index (exclusive).
     ///
     /// Removes all entries with index >= `from_index`.
     /// Used for conflict resolution during AppendEntries.
-    fn truncate_log(&mut self, from_index: LogIndex) -> Result<(), ConsensusError>;
+    async fn truncate_log(&mut self, from_index: LogIndex) -> Result<(), ConsensusError>;
 
     // ===== Metadata Operations =====
 
     /// Gets the current term.
-    fn get_term(&self) -> Result<Term, ConsensusError>;
+    async fn get_term(&self) -> Result<Term, ConsensusError>;
 
     /// Sets the current term.
     ///
     /// This operation must be atomic with clearing voted_for when term increases.
-    fn set_term(&mut self, term: Term) -> Result<(), ConsensusError>;
+    async fn set_term(&mut self, term: Term) -> Result<(), ConsensusError>;
 
     /// Gets the voted-for candidate in current term.
-    fn get_vote(&self) -> Result<Option<NodeId>, ConsensusError>;
+    async fn get_vote(&self) -> Result<Option<NodeId>, ConsensusError>;
 
     /// Sets the voted-for candidate.
-    fn set_vote(&mut self, vote: Option<NodeId>) -> Result<(), ConsensusError>;
+    async fn set_vote(&mut self, vote: Option<NodeId>) -> Result<(), ConsensusError>;
 
     /// Atomically updates term and vote together.
     ///
     /// This is critical for correctness - term and vote must be updated atomically.
-    fn set_term_and_vote(
+    async fn set_term_and_vote(
         &mut self,
         term: Term,
         vote: Option<NodeId>,
     ) -> Result<(), ConsensusError> {
         // Default implementation (not atomic, implementations should override)
-        self.set_term(term)?;
-        self.set_vote(vote)
+        self.set_term(term).await?;
+        self.set_vote(vote).await
     }
 
     /// Gets the commit index.
-    fn get_commit_index(&self) -> Result<LogIndex, ConsensusError>;
+    async fn get_commit_index(&self) -> Result<LogIndex, ConsensusError>;
 
     /// Sets the commit index.
-    fn set_commit_index(&mut self, index: LogIndex) -> Result<(), ConsensusError>;
+    async fn set_commit_index(&mut self, index: LogIndex) -> Result<(), ConsensusError>;
 
     // ===== Cluster Configuration =====
 
     /// Gets the current peer configuration.
-    fn get_peers(&self) -> Result<Vec<String>, ConsensusError>;
+    async fn get_peers(&self) -> Result<Vec<String>, ConsensusError>;
 
     /// Sets the current peer configuration.
-    fn set_peers(&mut self, peers: &[String]) -> Result<(), ConsensusError>;
+    async fn set_peers(&mut self, peers: &[String]) -> Result<(), ConsensusError>;
 
     // ===== Snapshot Operations =====
 
     /// Gets the current snapshot, if any.
-    fn get_snapshot(&self) -> Result<Option<Snapshot<T>>, ConsensusError>
+    async fn get_snapshot(&self) -> Result<Option<Snapshot<T>>, ConsensusError>
     where
         T: Clone + serde::de::DeserializeOwned;
 
@@ -199,12 +203,12 @@ pub trait RaftStorage<T>: Send {
     /// This compacts the log by:
     /// 1. Saving the snapshot atomically
     /// 2. Truncating log entries before the snapshot index
-    fn create_snapshot(&mut self, snapshot: Snapshot<T>) -> Result<(), ConsensusError>
+    async fn create_snapshot(&mut self, snapshot: Snapshot<T>) -> Result<(), ConsensusError>
     where
         T: Clone + Serialize;
 
     /// Installs a snapshot received from the leader.
-    fn install_snapshot(&mut self, snapshot: Snapshot<T>) -> Result<(), ConsensusError>
+    async fn install_snapshot(&mut self, snapshot: Snapshot<T>) -> Result<(), ConsensusError>
     where
         T: Clone + Serialize;
 }
@@ -245,10 +249,11 @@ impl<T> Default for InMemoryStorage<T> {
     }
 }
 
-impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T>
+#[async_trait]
+impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned> RaftStorage<T>
     for InMemoryStorage<T>
 {
-    fn append_entries(&mut self, entries: &[LogEntry<T>]) -> Result<(), ConsensusError> {
+    async fn append_entries(&mut self, entries: &[LogEntry<T>]) -> Result<(), ConsensusError> {
         tracing::trace!(
             entry_count = entries.len(),
             "Appending entries to in-memory log"
@@ -257,12 +262,12 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T>
         Ok(())
     }
 
-    fn get_log_entry(&self, index: LogIndex) -> Result<Option<LogEntry<T>>, ConsensusError> {
+    async fn get_log_entry(&self, index: LogIndex) -> Result<Option<LogEntry<T>>, ConsensusError> {
         // Find entry by its actual index field
         Ok(self.log.iter().find(|e| e.index == index).cloned())
     }
 
-    fn get_log_range(
+    async fn get_log_range(
         &self,
         start: LogIndex,
         end: LogIndex,
@@ -279,11 +284,11 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T>
             .collect())
     }
 
-    fn get_term(&self) -> Result<Term, ConsensusError> {
+    async fn get_term(&self) -> Result<Term, ConsensusError> {
         Ok(self.current_term)
     }
 
-    fn set_term(&mut self, term: Term) -> Result<(), ConsensusError> {
+    async fn set_term(&mut self, term: Term) -> Result<(), ConsensusError> {
         tracing::debug!(
             old_term = self.current_term,
             new_term = term,
@@ -293,11 +298,11 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T>
         Ok(())
     }
 
-    fn get_vote(&self) -> Result<Option<NodeId>, ConsensusError> {
+    async fn get_vote(&self) -> Result<Option<NodeId>, ConsensusError> {
         Ok(self.voted_for)
     }
 
-    fn set_vote(&mut self, vote: Option<NodeId>) -> Result<(), ConsensusError> {
+    async fn set_vote(&mut self, vote: Option<NodeId>) -> Result<(), ConsensusError> {
         tracing::debug!(
             old_vote = ?self.voted_for,
             new_vote = ?vote,
@@ -307,7 +312,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T>
         Ok(())
     }
 
-    fn set_term_and_vote(
+    async fn set_term_and_vote(
         &mut self,
         term: Term,
         vote: Option<NodeId>,
@@ -317,11 +322,11 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T>
         Ok(())
     }
 
-    fn get_log(&self) -> Result<Vec<LogEntry<T>>, ConsensusError> {
+    async fn get_log(&self) -> Result<Vec<LogEntry<T>>, ConsensusError> {
         Ok(self.log.clone())
     }
 
-    fn get_last_log_info(&self) -> Result<LogInfo, ConsensusError> {
+    async fn get_last_log_info(&self) -> Result<LogInfo, ConsensusError> {
         if let Some(entry) = self.log.last() {
             Ok(LogInfo {
                 last_index: entry.index,
@@ -337,7 +342,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T>
         }
     }
 
-    fn truncate_log(&mut self, from_index: LogIndex) -> Result<(), ConsensusError> {
+    async fn truncate_log(&mut self, from_index: LogIndex) -> Result<(), ConsensusError> {
         // Keep entries with index < from_index
         self.log.retain(|e| e.index < from_index);
         tracing::debug!(
@@ -348,29 +353,29 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T>
         Ok(())
     }
 
-    fn get_commit_index(&self) -> Result<LogIndex, ConsensusError> {
+    async fn get_commit_index(&self) -> Result<LogIndex, ConsensusError> {
         Ok(self.commit_index)
     }
 
-    fn set_commit_index(&mut self, index: LogIndex) -> Result<(), ConsensusError> {
+    async fn set_commit_index(&mut self, index: LogIndex) -> Result<(), ConsensusError> {
         self.commit_index = index;
         Ok(())
     }
 
-    fn get_peers(&self) -> Result<Vec<String>, ConsensusError> {
+    async fn get_peers(&self) -> Result<Vec<String>, ConsensusError> {
         Ok(self.peers.clone())
     }
 
-    fn set_peers(&mut self, peers: &[String]) -> Result<(), ConsensusError> {
+    async fn set_peers(&mut self, peers: &[String]) -> Result<(), ConsensusError> {
         self.peers = peers.to_vec();
         Ok(())
     }
 
-    fn get_snapshot(&self) -> Result<Option<Snapshot<T>>, ConsensusError> {
+    async fn get_snapshot(&self) -> Result<Option<Snapshot<T>>, ConsensusError> {
         Ok(self.snapshot.clone())
     }
 
-    fn create_snapshot(&mut self, snapshot: Snapshot<T>) -> Result<(), ConsensusError> {
+    async fn create_snapshot(&mut self, snapshot: Snapshot<T>) -> Result<(), ConsensusError> {
         let compact_up_to = snapshot.last_included_index;
         self.snapshot = Some(snapshot);
 
@@ -386,7 +391,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T>
         Ok(())
     }
 
-    fn install_snapshot(&mut self, snapshot: Snapshot<T>) -> Result<(), ConsensusError> {
+    async fn install_snapshot(&mut self, snapshot: Snapshot<T>) -> Result<(), ConsensusError> {
         self.first_log_index = snapshot.last_included_index + 1;
         self.log.clear();
         self.snapshot = Some(snapshot);
@@ -548,8 +553,9 @@ pub struct StorageStats {
     pub db_size_bytes: u64,
 }
 
-impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> for FileStorage<T> {
-    fn append_entries(&mut self, entries: &[LogEntry<T>]) -> Result<(), ConsensusError> {
+#[async_trait]
+impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned> RaftStorage<T> for FileStorage<T> {
+    async fn append_entries(&mut self, entries: &[LogEntry<T>]) -> Result<(), ConsensusError> {
         if entries.is_empty() {
             return Ok(());
         }
@@ -583,7 +589,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         Ok(())
     }
 
-    fn get_log_entry(&self, index: LogIndex) -> Result<Option<LogEntry<T>>, ConsensusError> {
+    async fn get_log_entry(&self, index: LogIndex) -> Result<Option<LogEntry<T>>, ConsensusError> {
         let first_index = self.get_first_log_index()?;
         if index < first_index {
             return Ok(None); // Compacted
@@ -603,7 +609,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         }
     }
 
-    fn get_log_range(
+    async fn get_log_range(
         &self,
         start: LogIndex,
         end: LogIndex,
@@ -618,7 +624,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         let mut entries = Vec::with_capacity((end - actual_start) as usize);
 
         for index in actual_start..end {
-            if let Some(entry) = self.get_log_entry(index)? {
+            if let Some(entry) = self.get_log_entry(index).await? {
                 entries.push(entry);
             } else {
                 break; // No more entries
@@ -628,7 +634,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         Ok(entries)
     }
 
-    fn get_term(&self) -> Result<Term, ConsensusError> {
+    async fn get_term(&self) -> Result<Term, ConsensusError> {
         if let Some(val) = self
             .meta_tree
             .get(keys::TERM)
@@ -640,7 +646,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         }
     }
 
-    fn set_term(&mut self, term: Term) -> Result<(), ConsensusError> {
+    async fn set_term(&mut self, term: Term) -> Result<(), ConsensusError> {
         let val =
             bincode::serialize(&term).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         self.meta_tree
@@ -654,7 +660,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         Ok(())
     }
 
-    fn get_vote(&self) -> Result<Option<NodeId>, ConsensusError> {
+    async fn get_vote(&self) -> Result<Option<NodeId>, ConsensusError> {
         if let Some(val) = self
             .meta_tree
             .get(keys::VOTE)
@@ -666,7 +672,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         }
     }
 
-    fn set_vote(&mut self, vote: Option<NodeId>) -> Result<(), ConsensusError> {
+    async fn set_vote(&mut self, vote: Option<NodeId>) -> Result<(), ConsensusError> {
         let val =
             bincode::serialize(&vote).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         self.meta_tree
@@ -680,7 +686,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         Ok(())
     }
 
-    fn set_term_and_vote(
+    async fn set_term_and_vote(
         &mut self,
         term: Term,
         vote: Option<NodeId>,
@@ -707,7 +713,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         Ok(())
     }
 
-    fn get_log(&self) -> Result<Vec<LogEntry<T>>, ConsensusError> {
+    async fn get_log(&self) -> Result<Vec<LogEntry<T>>, ConsensusError> {
         let mut entries = Vec::new();
         for item in self.log_tree.iter() {
             let (_, value) = item.map_err(|e| ConsensusError::StorageError(e.to_string()))?;
@@ -718,7 +724,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         Ok(entries)
     }
 
-    fn get_last_log_info(&self) -> Result<LogInfo, ConsensusError> {
+    async fn get_last_log_info(&self) -> Result<LogInfo, ConsensusError> {
         // Get the last entry from the log tree (highest index)
         if let Some(result) = self
             .log_tree
@@ -735,7 +741,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         }
 
         // Check for snapshot
-        if let Some(snapshot) = self.get_snapshot()? {
+        if let Some(snapshot) = self.get_snapshot().await? {
             return Ok(LogInfo {
                 last_index: snapshot.last_included_index,
                 last_term: snapshot.last_included_term,
@@ -745,7 +751,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         Ok(LogInfo::default())
     }
 
-    fn truncate_log(&mut self, from_index: LogIndex) -> Result<(), ConsensusError> {
+    async fn truncate_log(&mut self, from_index: LogIndex) -> Result<(), ConsensusError> {
         let mut batch = sled::Batch::default();
         let mut removed_count = 0u64;
 
@@ -774,7 +780,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         Ok(())
     }
 
-    fn get_commit_index(&self) -> Result<LogIndex, ConsensusError> {
+    async fn get_commit_index(&self) -> Result<LogIndex, ConsensusError> {
         if let Some(val) = self
             .meta_tree
             .get(keys::COMMIT_INDEX)
@@ -786,7 +792,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         }
     }
 
-    fn set_commit_index(&mut self, index: LogIndex) -> Result<(), ConsensusError> {
+    async fn set_commit_index(&mut self, index: LogIndex) -> Result<(), ConsensusError> {
         let val =
             bincode::serialize(&index).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         self.meta_tree
@@ -797,7 +803,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         Ok(())
     }
 
-    fn get_peers(&self) -> Result<Vec<String>, ConsensusError> {
+    async fn get_peers(&self) -> Result<Vec<String>, ConsensusError> {
         if let Some(val) = self
             .meta_tree
             .get(keys::PEERS)
@@ -809,7 +815,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         }
     }
 
-    fn set_peers(&mut self, peers: &[String]) -> Result<(), ConsensusError> {
+    async fn set_peers(&mut self, peers: &[String]) -> Result<(), ConsensusError> {
         let val =
             bincode::serialize(peers).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         self.meta_tree
@@ -821,7 +827,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         Ok(())
     }
 
-    fn get_snapshot(&self) -> Result<Option<Snapshot<T>>, ConsensusError> {
+    async fn get_snapshot(&self) -> Result<Option<Snapshot<T>>, ConsensusError> {
         if let Some(val) = self
             .meta_tree
             .get(keys::SNAPSHOT)
@@ -839,7 +845,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         }
     }
 
-    fn create_snapshot(&mut self, snapshot: Snapshot<T>) -> Result<(), ConsensusError> {
+    async fn create_snapshot(&mut self, snapshot: Snapshot<T>) -> Result<(), ConsensusError> {
         let last_included_index = snapshot.last_included_index;
 
         // Verify the snapshot before storing
@@ -882,7 +888,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
         Ok(())
     }
 
-    fn install_snapshot(&mut self, snapshot: Snapshot<T>) -> Result<(), ConsensusError> {
+    async fn install_snapshot(&mut self, snapshot: Snapshot<T>) -> Result<(), ConsensusError> {
         // Verify incoming snapshot
         snapshot.verify()?;
 
@@ -924,7 +930,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned> RaftStorage<T> f
 /// The Raft State Machine.
 ///
 /// Implements the Raft consensus algorithm for distributed agreement.
-pub struct RaftNode<T> {
+pub struct RaftNode<T: Send + Sync> {
     // Persistent State abstracted via Storage
     pub storage: Box<dyn RaftStorage<T>>,
 
@@ -944,7 +950,7 @@ pub struct RaftNode<T> {
     pub network: Box<dyn ConsensusNetwork>,
 }
 
-impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned + 'static> RaftNode<T> {
+impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static> RaftNode<T> {
     /// Creates a new Raft node with custom storage.
     ///
     /// # Arguments
@@ -953,33 +959,37 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned + 'static> RaftNo
     /// * `network` - Network transport for consensus messages
     /// * `storage` - Storage backend for persisting Raft state
     ///
+    /// # Note
+    ///
+    /// This constructor initializes with commit_index = 0. Call `init()` after
+    /// construction to load the actual commit index from storage.
+    ///
     /// # Example
     ///
     /// ```ignore
     /// use praborrow_lease::raft::{RaftNode, InMemoryStorage, FileStorage};
     ///
     /// // In-memory storage (volatile)
-    /// let node = RaftNode::new(1, network, Box::new(InMemoryStorage::new()));
+    /// let mut node = RaftNode::new(1, network, Box::new(InMemoryStorage::new()));
+    /// node.init().await?;
     ///
     /// // File-based storage (persistent)
-    /// let node = RaftNode::new(1, network, Box::new(FileStorage::open("./raft-data".into())?));
+    /// let mut node = RaftNode::new(1, network, Box::new(FileStorage::open("./raft-data".into())?));
+    /// node.init().await?;
     /// ```
     pub fn new(
         id: NodeId,
         network: Box<dyn ConsensusNetwork>,
         storage: Box<dyn RaftStorage<T>>,
     ) -> Self {
-        let commit_index = storage.get_commit_index().unwrap_or(0);
-
         tracing::info!(
             node_id = id,
-            commit_index = commit_index,
             "Creating new Raft node"
         );
 
         Self {
             storage,
-            commit_index,
+            commit_index: 0,
             last_applied: 0,
             next_index: Vec::new(),
             match_index: Vec::new(),
@@ -987,6 +997,19 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned + 'static> RaftNo
             id,
             network,
         }
+    }
+
+    /// Initializes the node by loading state from storage.
+    ///
+    /// Call this after construction to restore commit index from storage.
+    pub async fn init(&mut self) -> Result<(), ConsensusError> {
+        self.commit_index = self.storage.get_commit_index().await?;
+        tracing::info!(
+            node_id = self.id,
+            commit_index = self.commit_index,
+            "Initialized Raft node from storage"
+        );
+        Ok(())
     }
 
     /// Creates a new Raft node with default in-memory storage.
@@ -999,11 +1022,11 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned + 'static> RaftNo
 
     /// Transition to Candidate and start election.
     pub async fn start_election(&mut self) {
-        let current_term = self.storage.get_term().unwrap_or(0);
+        let current_term = self.storage.get_term().await.unwrap_or(0);
         let new_term = current_term + 1;
 
         // Atomically update term and vote for self
-        let _ = self.storage.set_term_and_vote(new_term, Some(self.id));
+        let _ = self.storage.set_term_and_vote(new_term, Some(self.id)).await;
 
         let old_role = self.role.clone();
         self.role = RaftRole::Candidate;
@@ -1027,9 +1050,9 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned + 'static> RaftNo
     }
 
     /// Handle RequestVote RPC.
-    pub fn handle_request_vote(&mut self, term: Term, candidate_id: NodeId) -> bool {
-        let current_term = self.storage.get_term().unwrap_or(0);
-        let _voted_for = self.storage.get_vote().unwrap_or(None);
+    pub async fn handle_request_vote(&mut self, term: Term, candidate_id: NodeId) -> bool {
+        let current_term = self.storage.get_term().await.unwrap_or(0);
+        let _voted_for = self.storage.get_vote().await.unwrap_or(None);
 
         if term > current_term {
             tracing::debug!(
@@ -1039,7 +1062,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned + 'static> RaftNo
                 "Received higher term, stepping down"
             );
             // Atomically update term and clear vote
-            let _ = self.storage.set_term_and_vote(term, None);
+            let _ = self.storage.set_term_and_vote(term, None).await;
             if self.role != RaftRole::Follower {
                 tracing::info!(
                     node_id = self.id,
@@ -1052,8 +1075,8 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned + 'static> RaftNo
         }
 
         // Re-read vote after potential update
-        let voted_for = self.storage.get_vote().unwrap_or(None);
-        let current_term = self.storage.get_term().unwrap_or(0);
+        let voted_for = self.storage.get_vote().await.unwrap_or(None);
+        let current_term = self.storage.get_term().await.unwrap_or(0);
 
         if term < current_term {
             tracing::debug!(
@@ -1069,7 +1092,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned + 'static> RaftNo
         // Check if we can grant vote
         if voted_for.is_none() || voted_for == Some(candidate_id) {
             // TODO: Also check log up-to-date (§5.4.1)
-            let log_info = self.storage.get_last_log_info().unwrap_or_default();
+            let log_info = self.storage.get_last_log_info().await.unwrap_or_default();
 
             tracing::debug!(
                 node_id = self.id,
@@ -1079,7 +1102,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned + 'static> RaftNo
                 our_last_term = log_info.last_term,
                 "Granting vote"
             );
-            let _ = self.storage.set_vote(Some(candidate_id));
+            let _ = self.storage.set_vote(Some(candidate_id)).await;
             return true;
         }
 
@@ -1094,9 +1117,9 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned + 'static> RaftNo
     }
 
     /// Become leader after winning election.
-    pub fn become_leader(&mut self) {
-        let peers = self.storage.get_peers().unwrap_or_default();
-        let log_info = self.storage.get_last_log_info().unwrap_or_default();
+    pub async fn become_leader(&mut self) {
+        let peers = self.storage.get_peers().await.unwrap_or_default();
+        let log_info = self.storage.get_last_log_info().await.unwrap_or_default();
 
         // Initialize leader state
         self.next_index = vec![log_info.last_index + 1; peers.len()];
@@ -1105,7 +1128,7 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned + 'static> RaftNo
 
         tracing::info!(
             node_id = self.id,
-            term = self.storage.get_term().unwrap_or(0),
+            term = self.storage.get_term().await.unwrap_or(0),
             peer_count = peers.len(),
             "Became leader"
         );
@@ -1115,10 +1138,10 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned + 'static> RaftNo
     ///
     /// Updates both persistent storage and the active network transport.
     pub async fn add_node(&mut self, peer_address: String) -> Result<(), ConsensusError> {
-        let mut peers = self.storage.get_peers()?;
+        let mut peers = self.storage.get_peers().await?;
         if !peers.contains(&peer_address) {
             peers.push(peer_address.clone());
-            self.storage.set_peers(&peers)?;
+            self.storage.set_peers(&peers).await?;
 
             // Notify network layer
             if let Err(e) = self.network.update_peers(peers).await {
@@ -1136,10 +1159,10 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned + 'static> RaftNo
 
     /// Removes a peer from the cluster configuration.
     pub async fn remove_node(&mut self, peer_address: &str) -> Result<(), ConsensusError> {
-        let mut peers = self.storage.get_peers()?;
+        let mut peers = self.storage.get_peers().await?;
         if let Some(pos) = peers.iter().position(|p| p == peer_address) {
             peers.remove(pos);
-            self.storage.set_peers(&peers)?;
+            self.storage.set_peers(&peers).await?;
 
             // Notify network layer
             if let Err(e) = self.network.update_peers(peers).await {
@@ -1164,29 +1187,29 @@ impl<T: Clone + Send + Serialize + serde::de::DeserializeOwned + 'static> RaftNo
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_in_memory_storage() {
+    #[tokio::test]
+    async fn test_in_memory_storage() {
         let mut storage: InMemoryStorage<String> = InMemoryStorage::new();
 
-        assert_eq!(storage.get_term().unwrap(), 0);
-        storage.set_term(5).unwrap();
-        assert_eq!(storage.get_term().unwrap(), 5);
+        assert_eq!(storage.get_term().await.unwrap(), 0);
+        storage.set_term(5).await.unwrap();
+        assert_eq!(storage.get_term().await.unwrap(), 5);
 
-        assert_eq!(storage.get_vote().unwrap(), None);
-        storage.set_vote(Some(42)).unwrap();
-        assert_eq!(storage.get_vote().unwrap(), Some(42));
+        assert_eq!(storage.get_vote().await.unwrap(), None);
+        storage.set_vote(Some(42)).await.unwrap();
+        assert_eq!(storage.get_vote().await.unwrap(), Some(42));
 
         let entry = LogEntry {
             term: 1,
             index: 1,
             command: "test".to_string(),
         };
-        storage.append_entries(&[entry]).unwrap();
-        assert_eq!(storage.get_log().unwrap().len(), 1);
+        storage.append_entries(&[entry]).await.unwrap();
+        assert_eq!(storage.get_log().await.unwrap().len(), 1);
     }
 
-    #[test]
-    fn test_in_memory_storage_log_operations() {
+    #[tokio::test]
+    async fn test_in_memory_storage_log_operations() {
         let mut storage: InMemoryStorage<String> = InMemoryStorage::new();
 
         // Append multiple entries
@@ -1197,33 +1220,33 @@ mod tests {
                 command: format!("cmd{}", i),
             })
             .collect();
-        storage.append_entries(&entries).unwrap();
+        storage.append_entries(&entries).await.unwrap();
 
         // Test get_log_entry
-        assert!(storage.get_log_entry(0).unwrap().is_none());
-        assert_eq!(storage.get_log_entry(1).unwrap().unwrap().command, "cmd1");
-        assert_eq!(storage.get_log_entry(5).unwrap().unwrap().command, "cmd5");
+        assert!(storage.get_log_entry(0).await.unwrap().is_none());
+        assert_eq!(storage.get_log_entry(1).await.unwrap().unwrap().command, "cmd1");
+        assert_eq!(storage.get_log_entry(5).await.unwrap().unwrap().command, "cmd5");
 
         // Test get_log_range
-        let range = storage.get_log_range(2, 4).unwrap();
+        let range = storage.get_log_range(2, 4).await.unwrap();
         assert_eq!(range.len(), 2);
         assert_eq!(range[0].index, 2);
         assert_eq!(range[1].index, 3);
 
         // Test get_last_log_info
-        let info = storage.get_last_log_info().unwrap();
+        let info = storage.get_last_log_info().await.unwrap();
         assert_eq!(info.last_index, 5);
         assert_eq!(info.last_term, 1);
 
         // Test truncate_log
-        storage.truncate_log(3).unwrap();
-        assert_eq!(storage.get_log().unwrap().len(), 2);
-        let info = storage.get_last_log_info().unwrap();
+        storage.truncate_log(3).await.unwrap();
+        assert_eq!(storage.get_log().await.unwrap().len(), 2);
+        let info = storage.get_last_log_info().await.unwrap();
         assert_eq!(info.last_index, 2);
     }
 
-    #[test]
-    fn test_in_memory_storage_snapshot() {
+    #[tokio::test]
+    async fn test_in_memory_storage_snapshot() {
         let mut storage: InMemoryStorage<String> = InMemoryStorage::new();
 
         // Add log entries
@@ -1234,25 +1257,25 @@ mod tests {
                 command: format!("cmd{}", i),
             })
             .collect();
-        storage.append_entries(&entries).unwrap();
+        storage.append_entries(&entries).await.unwrap();
 
         // Create snapshot at index 5
         let snapshot = Snapshot::new(5, 1, "snapshot_data".to_string()).unwrap();
-        storage.create_snapshot(snapshot).unwrap();
+        storage.create_snapshot(snapshot).await.unwrap();
 
         // Verify log compaction
-        assert_eq!(storage.get_log().unwrap().len(), 5); // entries 6-10 remain
-        assert!(storage.get_log_entry(5).unwrap().is_none()); // compacted
-        assert!(storage.get_log_entry(6).unwrap().is_some()); // still there
+        assert_eq!(storage.get_log().await.unwrap().len(), 5); // entries 6-10 remain
+        assert!(storage.get_log_entry(5).await.unwrap().is_none()); // compacted
+        assert!(storage.get_log_entry(6).await.unwrap().is_some()); // still there
 
         // Verify snapshot
-        let retrieved = storage.get_snapshot().unwrap().unwrap();
+        let retrieved = storage.get_snapshot().await.unwrap().unwrap();
         assert_eq!(retrieved.last_included_index, 5);
         assert_eq!(retrieved.data, "snapshot_data");
     }
 
-    #[test]
-    fn test_file_storage_persistence() {
+    #[tokio::test]
+    async fn test_file_storage_persistence() {
         let path = std::env::temp_dir().join("raft_test_storage_v2");
         // Clean up previous run
         if path.exists() {
@@ -1261,24 +1284,24 @@ mod tests {
 
         {
             let mut storage: FileStorage<String> = FileStorage::open(path.clone()).unwrap();
-            storage.set_term(10).unwrap();
-            storage.set_vote(Some(1)).unwrap();
+            storage.set_term(10).await.unwrap();
+            storage.set_vote(Some(1)).await.unwrap();
 
             let entry = LogEntry {
                 term: 1,
                 index: 1,
                 command: "test_persist".to_string(),
             };
-            storage.append_entries(&[entry]).unwrap();
+            storage.append_entries(&[entry]).await.unwrap();
         }
 
         // Re-open
         {
             let storage: FileStorage<String> = FileStorage::open(path.clone()).unwrap();
-            assert_eq!(storage.get_term().unwrap(), 10);
-            assert_eq!(storage.get_vote().unwrap(), Some(1));
+            assert_eq!(storage.get_term().await.unwrap(), 10);
+            assert_eq!(storage.get_vote().await.unwrap(), Some(1));
 
-            let log = storage.get_log().unwrap();
+            let log = storage.get_log().await.unwrap();
             assert_eq!(log.len(), 1);
             assert_eq!(log[0].command, "test_persist");
         }
@@ -1287,8 +1310,8 @@ mod tests {
         std::fs::remove_dir_all(path).unwrap();
     }
 
-    #[test]
-    fn test_file_storage_atomic_term_and_vote() {
+    #[tokio::test]
+    async fn test_file_storage_atomic_term_and_vote() {
         let path = std::env::temp_dir().join("raft_test_atomic");
         if path.exists() {
             std::fs::remove_dir_all(&path).unwrap();
@@ -1296,20 +1319,20 @@ mod tests {
 
         {
             let mut storage: FileStorage<String> = FileStorage::open(path.clone()).unwrap();
-            storage.set_term_and_vote(5, Some(42)).unwrap();
+            storage.set_term_and_vote(5, Some(42)).await.unwrap();
         }
 
         {
             let storage: FileStorage<String> = FileStorage::open(path.clone()).unwrap();
-            assert_eq!(storage.get_term().unwrap(), 5);
-            assert_eq!(storage.get_vote().unwrap(), Some(42));
+            assert_eq!(storage.get_term().await.unwrap(), 5);
+            assert_eq!(storage.get_vote().await.unwrap(), Some(42));
         }
 
         std::fs::remove_dir_all(path).unwrap();
     }
 
-    #[test]
-    fn test_file_storage_log_truncation() {
+    #[tokio::test]
+    async fn test_file_storage_log_truncation() {
         let path = std::env::temp_dir().join("raft_test_truncate");
         if path.exists() {
             std::fs::remove_dir_all(&path).unwrap();
@@ -1325,12 +1348,12 @@ mod tests {
                 command: format!("cmd{}", i),
             })
             .collect();
-        storage.append_entries(&entries).unwrap();
+        storage.append_entries(&entries).await.unwrap();
 
         // Truncate
-        storage.truncate_log(3).unwrap();
+        storage.truncate_log(3).await.unwrap();
 
-        let log = storage.get_log().unwrap();
+        let log = storage.get_log().await.unwrap();
         assert_eq!(log.len(), 2);
         assert_eq!(log[0].index, 1);
         assert_eq!(log[1].index, 2);
@@ -1338,8 +1361,8 @@ mod tests {
         std::fs::remove_dir_all(path).unwrap();
     }
 
-    #[test]
-    fn test_file_storage_snapshot() {
+    #[tokio::test]
+    async fn test_file_storage_snapshot() {
         let path = std::env::temp_dir().join("raft_test_snapshot");
         if path.exists() {
             std::fs::remove_dir_all(&path).unwrap();
@@ -1356,23 +1379,23 @@ mod tests {
                     command: format!("cmd{}", i),
                 })
                 .collect();
-            storage.append_entries(&entries).unwrap();
+            storage.append_entries(&entries).await.unwrap();
 
             // Create snapshot
             let snapshot = Snapshot::new(5, 1, "state_at_5".to_string()).unwrap();
-            storage.create_snapshot(snapshot).unwrap();
+            storage.create_snapshot(snapshot).await.unwrap();
         }
 
         // Re-open and verify
         {
             let storage: FileStorage<String> = FileStorage::open(path.clone()).unwrap();
 
-            let snapshot = storage.get_snapshot().unwrap().unwrap();
+            let snapshot = storage.get_snapshot().await.unwrap().unwrap();
             assert_eq!(snapshot.last_included_index, 5);
             assert_eq!(snapshot.data, "state_at_5");
 
             // Log should only have entries 6-10
-            let log = storage.get_log().unwrap();
+            let log = storage.get_log().await.unwrap();
             assert_eq!(log.len(), 5);
             assert_eq!(log[0].index, 6);
         }
@@ -1426,7 +1449,7 @@ mod tests {
         let mut node = RaftNode::new(1, network, Box::new(InMemoryStorage::<String>::new()));
 
         // Initial state
-        assert!(node.storage.get_peers().unwrap().is_empty());
+        assert!(node.storage.get_peers().await.unwrap().is_empty());
         assert!(shared_peers.read().unwrap().is_empty());
 
         // Add node
@@ -1435,7 +1458,7 @@ mod tests {
             .unwrap();
 
         // Verify storage
-        let peers = node.storage.get_peers().unwrap();
+        let peers = node.storage.get_peers().await.unwrap();
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0], "192.168.1.10:8000");
 
@@ -1446,12 +1469,13 @@ mod tests {
         node.add_node("192.168.1.10:8000".to_string())
             .await
             .unwrap();
-        let peers = node.storage.get_peers().unwrap();
+        let peers = node.storage.get_peers().await.unwrap();
         assert_eq!(peers.len(), 1);
 
         // Remove node
         node.remove_node("192.168.1.10:8000").await.unwrap();
-        assert!(node.storage.get_peers().unwrap().is_empty());
+        assert!(node.storage.get_peers().await.unwrap().is_empty());
         assert!(shared_peers.read().unwrap().is_empty());
     }
 }
+

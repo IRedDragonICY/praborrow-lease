@@ -157,32 +157,32 @@ mod tests {
         let mut storage3: InMemoryStorage<String> = InMemoryStorage::new();
 
         // Node 1 becomes candidate with term 1
-        storage1.set_term(1).unwrap();
-        storage1.set_vote(Some(1)).unwrap();
+        storage1.set_term(1).await.unwrap();
+        storage1.set_vote(Some(1)).await.unwrap();
 
         // Simulate vote responses
         // Node 2 votes for node 1
         let vote_granted = {
-            let current_term = storage2.get_term().unwrap_or(0);
-            let voted_for = storage2.get_vote().unwrap_or(None);
+            let current_term = storage2.get_term().await.unwrap_or(0);
+            let voted_for = storage2.get_vote().await.unwrap_or(None);
 
             // Grant vote: term >= current, not voted yet
             1 >= current_term && voted_for.is_none()
         };
 
         assert!(vote_granted);
-        storage2.set_vote(Some(1)).unwrap();
+        storage2.set_vote(Some(1)).await.unwrap();
 
         // Node 3 votes for node 1
         let vote_granted = {
-            let current_term = storage3.get_term().unwrap_or(0);
-            let voted_for = storage3.get_vote().unwrap_or(None);
+            let current_term = storage3.get_term().await.unwrap_or(0);
+            let voted_for = storage3.get_vote().await.unwrap_or(None);
 
             1 >= current_term && voted_for.is_none()
         };
 
         assert!(vote_granted);
-        storage3.set_vote(Some(1)).unwrap();
+        storage3.set_vote(Some(1)).await.unwrap();
 
         // Node 1 has 3 votes (including self), quorum is 2
         let votes = 3;
@@ -213,7 +213,7 @@ mod tests {
                 command: "cmd3".to_string(),
             },
         ];
-        leader_storage.append_entries(&entries).unwrap();
+        leader_storage.append_entries(&entries).await.unwrap();
 
         // Simulate AppendEntries RPC
         let prev_log_index = 0;
@@ -225,6 +225,7 @@ mod tests {
         } else {
             follower_storage
                 .get_log_entry(prev_log_index)
+                .await
                 .unwrap()
                 .map(|e| e.term == prev_log_term)
                 .unwrap_or(false)
@@ -233,12 +234,12 @@ mod tests {
         assert!(consistent);
 
         // Follower appends entries
-        follower_storage.append_entries(&entries).unwrap();
+        follower_storage.append_entries(&entries).await.unwrap();
 
         // Verify replication
-        assert_eq!(follower_storage.get_log().unwrap().len(), 3);
+        assert_eq!(follower_storage.get_log().await.unwrap().len(), 3);
         assert_eq!(
-            follower_storage.get_log_entry(2).unwrap().unwrap().command,
+            follower_storage.get_log_entry(2).await.unwrap().unwrap().command,
             "cmd2"
         );
     }
@@ -260,7 +261,7 @@ mod tests {
                 command: "cmd2".to_string(),
             },
         ];
-        storage.append_entries(&entries).unwrap();
+        storage.append_entries(&entries).await.unwrap();
 
         // Simulate majority replication (match_index)
         let match_indices = vec![2, 2]; // 2 followers at index 2
@@ -276,8 +277,8 @@ mod tests {
         }
 
         assert_eq!(commit_index, 2);
-        storage.set_commit_index(commit_index).unwrap();
-        assert_eq!(storage.get_commit_index().unwrap(), 2);
+        storage.set_commit_index(commit_index).await.unwrap();
+        assert_eq!(storage.get_commit_index().await.unwrap(), 2);
     }
 
     #[tokio::test]
@@ -302,7 +303,7 @@ mod tests {
                 command: "conflict".to_string(),
             },
         ];
-        storage.append_entries(&old_entries).unwrap();
+        storage.append_entries(&old_entries).await.unwrap();
 
         // Leader sends entries with different term at index 3
         let new_entries = vec![
@@ -319,18 +320,18 @@ mod tests {
         ];
 
         // Check for conflict at index 3
-        let existing = storage.get_log_entry(3).unwrap().unwrap();
+        let existing = storage.get_log_entry(3).await.unwrap().unwrap();
         if existing.term != 3 {
             // Truncate from index 3
-            storage.truncate_log(3).unwrap();
+            storage.truncate_log(3).await.unwrap();
         }
 
         // Append new entries
-        storage.append_entries(&new_entries).unwrap();
+        storage.append_entries(&new_entries).await.unwrap();
 
         // Verify
-        assert_eq!(storage.get_log().unwrap().len(), 4);
-        assert_eq!(storage.get_log_entry(3).unwrap().unwrap().command, "new3");
+        assert_eq!(storage.get_log().await.unwrap().len(), 4);
+        assert_eq!(storage.get_log_entry(3).await.unwrap().unwrap().command, "new3");
     }
 
     #[tokio::test]
@@ -357,13 +358,13 @@ mod tests {
                 },
             },
         ];
-        storage.append_entries(&entries).unwrap();
+        storage.append_entries(&entries).await.unwrap();
 
         // Create replicated state machine
         let mut rsm = ReplicatedStateMachine::new(sm, storage);
 
         // Apply committed entries
-        let outputs = rsm.apply_committed(2).unwrap();
+        let outputs = rsm.apply_committed(2).await.unwrap();
 
         assert_eq!(outputs.len(), 2);
         assert_eq!(rsm.last_applied(), 2);

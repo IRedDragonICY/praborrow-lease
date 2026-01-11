@@ -195,7 +195,10 @@ use crate::engine::ConsensusError;
 use crate::raft::{LogIndex, RaftStorage};
 
 /// A replicated state machine that applies committed log entries.
-pub struct ReplicatedStateMachine<SM: StateMachine, S: RaftStorage<SM::Command>> {
+pub struct ReplicatedStateMachine<SM: StateMachine, S: RaftStorage<SM::Command>>
+where
+    SM::Command: Send + Sync,
+{
     /// The underlying state machine
     state_machine: SM,
     /// Storage for accessing committed entries
@@ -207,6 +210,7 @@ pub struct ReplicatedStateMachine<SM: StateMachine, S: RaftStorage<SM::Command>>
 impl<SM, S> ReplicatedStateMachine<SM, S>
 where
     SM: StateMachine,
+    SM::Command: Send + Sync,
     S: RaftStorage<SM::Command>,
 {
     /// Creates a new replicated state machine.
@@ -231,7 +235,7 @@ where
     /// Applies all committed entries up to commit_index.
     ///
     /// Returns the outputs for each applied command.
-    pub fn apply_committed(
+    pub async fn apply_committed(
         &mut self,
         commit_index: LogIndex,
     ) -> Result<Vec<(LogIndex, SM::Output)>, ConsensusError> {
@@ -240,7 +244,7 @@ where
         while self.last_applied < commit_index {
             let next_index = self.last_applied + 1;
 
-            if let Some(entry) = self.storage.get_log_entry(next_index)? {
+            if let Some(entry) = self.storage.get_log_entry(next_index).await? {
                 let output = self.state_machine.apply(entry.command);
                 outputs.push((next_index, output));
                 self.last_applied = next_index;
