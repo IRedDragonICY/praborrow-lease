@@ -111,13 +111,13 @@ pub struct LogInfo {
 ///
 /// All methods are async to support non-blocking I/O backends (e.g., remote databases).
 #[async_trait]
-pub trait RaftStorage<T>: Send + Sync {
-    // ===== Core Log Operations =====
-
-    /// Appends entries to the log.
+pub trait RaftStorage<T>: Send + Sync
+where
+    T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static,
+{
+    /// Appends log entries to the storage.
     ///
-    /// Entries are appended atomically. Either all entries are persisted
-    /// or none are.
+    /// The entries must be persisted durably before returning.
     async fn append_entries(&mut self, entries: &[LogEntry<T>]) -> Result<(), ConsensusError>;
 
     /// Gets a single log entry by index.
@@ -132,10 +132,14 @@ pub trait RaftStorage<T>: Send + Sync {
         &self,
         start: LogIndex,
         end: LogIndex,
-    ) -> Result<Vec<LogEntry<T>>, ConsensusError>;
+    ) -> Result<Box<dyn Iterator<Item = Result<LogEntry<T>, ConsensusError>> + Send>, ConsensusError>;
 
     /// Gets all log entries.
-    async fn get_log(&self) -> Result<Vec<LogEntry<T>>, ConsensusError>;
+    ///
+    /// Returns an iterator over all log entries.
+    async fn get_log(
+        &self,
+    ) -> Result<Box<dyn Iterator<Item = Result<LogEntry<T>, ConsensusError>> + Send>, ConsensusError>;
 
     /// Gets the last log index and term.
     ///
@@ -250,7 +254,7 @@ impl<T> Default for InMemoryStorage<T> {
 }
 
 #[async_trait]
-impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned> RaftStorage<T>
+impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static> RaftStorage<T>
     for InMemoryStorage<T>
 {
     async fn append_entries(&mut self, entries: &[LogEntry<T>]) -> Result<(), ConsensusError> {
@@ -271,17 +275,19 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned> RaftStora
         &self,
         start: LogIndex,
         end: LogIndex,
-    ) -> Result<Vec<LogEntry<T>>, ConsensusError> {
+    ) -> Result<Box<dyn Iterator<Item = Result<LogEntry<T>, ConsensusError>> + Send>, ConsensusError> {
         if start >= end {
-            return Ok(Vec::new());
+            return Ok(Box::new(std::iter::empty()));
         }
         // Filter entries by their actual index field
-        Ok(self
+        let entries: Vec<Result<LogEntry<T>, ConsensusError>> = self
             .log
             .iter()
             .filter(|e| e.index >= start && e.index < end)
             .cloned()
-            .collect())
+            .map(Ok)
+            .collect();
+        Ok(Box::new(entries.into_iter()))
     }
 
     async fn get_term(&self) -> Result<Term, ConsensusError> {
@@ -322,8 +328,11 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned> RaftStora
         Ok(())
     }
 
-    async fn get_log(&self) -> Result<Vec<LogEntry<T>>, ConsensusError> {
-        Ok(self.log.clone())
+    async fn get_log(
+        &self,
+    ) -> Result<Box<dyn Iterator<Item = Result<LogEntry<T>, ConsensusError>> + Send>, ConsensusError> {
+        let entries: Vec<Result<LogEntry<T>, ConsensusError>> = self.log.iter().cloned().map(Ok).collect();
+        Ok(Box::new(entries.into_iter()))
     }
 
     async fn get_last_log_info(&self) -> Result<LogInfo, ConsensusError> {
@@ -554,7 +563,7 @@ pub struct StorageStats {
 }
 
 #[async_trait]
-impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned> RaftStorage<T> for FileStorage<T> {
+impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static> RaftStorage<T> for FileStorage<T> {
     async fn append_entries(&mut self, entries: &[LogEntry<T>]) -> Result<(), ConsensusError> {
         if entries.is_empty() {
             return Ok(());
@@ -613,25 +622,22 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned> RaftStora
         &self,
         start: LogIndex,
         end: LogIndex,
-    ) -> Result<Vec<LogEntry<T>>, ConsensusError> {
+    ) -> Result<Box<dyn Iterator<Item = Result<LogEntry<T>, ConsensusError>> + Send>, ConsensusError> {
         if start >= end {
-            return Ok(Vec::new());
+            return Ok(Box::new(std::iter::empty()));
         }
 
         let first_index = self.get_first_log_index()?;
         let actual_start = start.max(first_index);
+        let start_key = actual_start.to_be_bytes();
+        let end_key = end.to_be_bytes();
 
-        let mut entries = Vec::with_capacity((end - actual_start) as usize);
+        let iter = self.log_tree.range(start_key..end_key).map(|res| {
+            let (_, val) = res.map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            bincode::deserialize(&val).map_err(|e| ConsensusError::StorageError(e.to_string()))
+        });
 
-        for index in actual_start..end {
-            if let Some(entry) = self.get_log_entry(index).await? {
-                entries.push(entry);
-            } else {
-                break; // No more entries
-            }
-        }
-
-        Ok(entries)
+        Ok(Box::new(iter))
     }
 
     async fn get_term(&self) -> Result<Term, ConsensusError> {
@@ -713,15 +719,14 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned> RaftStora
         Ok(())
     }
 
-    async fn get_log(&self) -> Result<Vec<LogEntry<T>>, ConsensusError> {
-        let mut entries = Vec::new();
-        for item in self.log_tree.iter() {
-            let (_, value) = item.map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-            let entry: LogEntry<T> = bincode::deserialize(&value)
-                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-            entries.push(entry);
-        }
-        Ok(entries)
+    async fn get_log(
+        &self,
+    ) -> Result<Box<dyn Iterator<Item = Result<LogEntry<T>, ConsensusError>> + Send>, ConsensusError> {
+        let iter = self.log_tree.iter().map(|res| {
+            let (_, val) = res.map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            bincode::deserialize(&val).map_err(|e| ConsensusError::StorageError(e.to_string()))
+        });
+        Ok(Box::new(iter))
     }
 
     async fn get_last_log_info(&self) -> Result<LogInfo, ConsensusError> {
@@ -798,6 +803,7 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned> RaftStora
         self.meta_tree
             .insert(keys::COMMIT_INDEX, val)
             .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+
         // Note: commit_index is not flushed immediately for performance
         // It can be reconstructed from the log on recovery
         Ok(())
@@ -1205,7 +1211,7 @@ mod tests {
             command: "test".to_string(),
         };
         storage.append_entries(&[entry]).await.unwrap();
-        assert_eq!(storage.get_log().await.unwrap().len(), 1);
+        assert_eq!(storage.get_log().await.unwrap().count(), 1);
     }
 
     #[tokio::test]
@@ -1228,7 +1234,7 @@ mod tests {
         assert_eq!(storage.get_log_entry(5).await.unwrap().unwrap().command, "cmd5");
 
         // Test get_log_range
-        let range = storage.get_log_range(2, 4).await.unwrap();
+        let range: Vec<LogEntry<String>> = storage.get_log_range(2, 4).await.unwrap().collect::<Result<_, _>>().unwrap();
         assert_eq!(range.len(), 2);
         assert_eq!(range[0].index, 2);
         assert_eq!(range[1].index, 3);
@@ -1240,7 +1246,7 @@ mod tests {
 
         // Test truncate_log
         storage.truncate_log(3).await.unwrap();
-        assert_eq!(storage.get_log().await.unwrap().len(), 2);
+        assert_eq!(storage.get_log().await.unwrap().count(), 2);
         let info = storage.get_last_log_info().await.unwrap();
         assert_eq!(info.last_index, 2);
     }
@@ -1264,7 +1270,7 @@ mod tests {
         storage.create_snapshot(snapshot).await.unwrap();
 
         // Verify log compaction
-        assert_eq!(storage.get_log().await.unwrap().len(), 5); // entries 6-10 remain
+        assert_eq!(storage.get_log().await.unwrap().count(), 5); // entries 6-10 remain
         assert!(storage.get_log_entry(5).await.unwrap().is_none()); // compacted
         assert!(storage.get_log_entry(6).await.unwrap().is_some()); // still there
 
@@ -1301,7 +1307,7 @@ mod tests {
             assert_eq!(storage.get_term().await.unwrap(), 10);
             assert_eq!(storage.get_vote().await.unwrap(), Some(1));
 
-            let log = storage.get_log().await.unwrap();
+            let log: Vec<LogEntry<String>> = storage.get_log().await.unwrap().collect::<Result<_, _>>().unwrap();
             assert_eq!(log.len(), 1);
             assert_eq!(log[0].command, "test_persist");
         }
@@ -1353,7 +1359,7 @@ mod tests {
         // Truncate
         storage.truncate_log(3).await.unwrap();
 
-        let log = storage.get_log().await.unwrap();
+        let log: Vec<LogEntry<String>> = storage.get_log().await.unwrap().collect::<Result<_, _>>().unwrap();
         assert_eq!(log.len(), 2);
         assert_eq!(log[0].index, 1);
         assert_eq!(log[1].index, 2);
@@ -1395,7 +1401,7 @@ mod tests {
             assert_eq!(snapshot.data, "state_at_5");
 
             // Log should only have entries 6-10
-            let log = storage.get_log().await.unwrap();
+            let log: Vec<LogEntry<String>> = storage.get_log().await.unwrap().collect::<Result<_, _>>().unwrap();
             assert_eq!(log.len(), 5);
             assert_eq!(log[0].index, 6);
         }

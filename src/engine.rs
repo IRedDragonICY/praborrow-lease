@@ -16,34 +16,69 @@ use std::time::Duration;
 // CONFIGURATION
 // ============================================================================
 
+use serde::Deserialize;
+
 /// Raft timing configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct RaftConfig {
     /// Minimum election timeout (randomized between min and max)
+    #[serde(deserialize_with = "deserialize_duration", default = "default_election_min")]
     pub election_timeout_min: Duration,
     /// Maximum election timeout
+    #[serde(deserialize_with = "deserialize_duration", default = "default_election_max")]
     pub election_timeout_max: Duration,
     /// Heartbeat interval (must be << election timeout)
+    #[serde(deserialize_with = "deserialize_duration", default = "default_heartbeat")]
     pub heartbeat_interval: Duration,
     /// RPC timeout
+    #[serde(deserialize_with = "deserialize_duration", default = "default_rpc_timeout")]
     pub rpc_timeout: Duration,
     /// Max entries per AppendEntries RPC
+    #[serde(default = "default_max_entries")]
     pub max_entries_per_rpc: usize,
 }
+
+fn deserialize_duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let ms = u64::deserialize(deserializer)?;
+    Ok(Duration::from_millis(ms))
+}
+
+fn default_election_min() -> Duration { Duration::from_millis(150) }
+fn default_election_max() -> Duration { Duration::from_millis(300) }
+fn default_heartbeat() -> Duration { Duration::from_millis(50) }
+fn default_rpc_timeout() -> Duration { Duration::from_millis(100) }
+fn default_max_entries() -> usize { 100 }
 
 impl Default for RaftConfig {
     fn default() -> Self {
         Self {
-            election_timeout_min: Duration::from_millis(150),
-            election_timeout_max: Duration::from_millis(300),
-            heartbeat_interval: Duration::from_millis(50),
-            rpc_timeout: Duration::from_millis(100),
-            max_entries_per_rpc: 100,
+            election_timeout_min: default_election_min(),
+            election_timeout_max: default_election_max(),
+            heartbeat_interval: default_heartbeat(),
+            rpc_timeout: default_rpc_timeout(),
+            max_entries_per_rpc: default_max_entries(),
         }
     }
 }
 
 impl RaftConfig {
+    /// Loads configuration from `raft.toml` and environment variables.
+    ///
+    /// # Priority (Highest first):
+    /// 1. Environment variables (PRABORROW_*)
+    /// 2. `raft.toml` file
+    /// 3. Defaults
+    pub fn load() -> Result<Self, config::ConfigError> {
+        let builder = config::Config::builder()
+            .add_source(config::File::with_name("raft").required(false))
+            .add_source(config::Environment::with_prefix("PRABORROW"));
+
+        builder.build()?.try_deserialize()
+    }
+
     /// Returns a randomized election timeout
     pub fn random_election_timeout(&self) -> Duration {
         let min = self.election_timeout_min.as_millis() as u64;
@@ -653,7 +688,8 @@ where
         let last_log_info = self.storage.get_last_log_info().await?;
         let end_idx =
             (next_idx + self.config.max_entries_per_rpc as u64).min(last_log_info.last_index + 1);
-        let entries = self.storage.get_log_range(next_idx, end_idx).await?;
+        let entries_iter = self.storage.get_log_range(next_idx, end_idx).await?;
+        let entries: Vec<LogEntry<T>> = entries_iter.collect::<Result<_, _>>()?;
 
         self.network
             .send_append_entries(

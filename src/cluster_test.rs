@@ -237,7 +237,7 @@ mod tests {
         follower_storage.append_entries(&entries).await.unwrap();
 
         // Verify replication
-        assert_eq!(follower_storage.get_log().await.unwrap().len(), 3);
+        assert_eq!(follower_storage.get_log().await.unwrap().count(), 3);
         assert_eq!(
             follower_storage.get_log_entry(2).await.unwrap().unwrap().command,
             "cmd2"
@@ -330,7 +330,7 @@ mod tests {
         storage.append_entries(&new_entries).await.unwrap();
 
         // Verify
-        assert_eq!(storage.get_log().await.unwrap().len(), 4);
+        assert_eq!(storage.get_log().await.unwrap().count(), 4);
         assert_eq!(storage.get_log_entry(3).await.unwrap().unwrap().command, "new3");
     }
 

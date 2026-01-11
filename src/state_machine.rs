@@ -55,13 +55,13 @@ use std::fmt::Debug;
 /// ```
 pub trait StateMachine: Send + Sync {
     /// The command type that modifies the state machine.
-    type Command: Clone + Send + Sync + Serialize + DeserializeOwned + Debug;
+    type Command: Clone + Send + Sync + Serialize + DeserializeOwned + Debug + 'static;
 
     /// The output produced when applying a command.
-    type Output: Clone + Send + Sync + Serialize + DeserializeOwned + Debug;
+    type Output: Clone + Send + Sync + Serialize + DeserializeOwned + Debug + 'static;
 
     /// The snapshot data format.
-    type SnapshotData: Clone + Send + Sync + Serialize + DeserializeOwned;
+    type SnapshotData: Clone + Send + Sync + Serialize + DeserializeOwned + 'static;
 
     /// Applies a command to the state machine, returning the result.
     ///

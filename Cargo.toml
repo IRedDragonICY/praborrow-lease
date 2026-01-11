@@ -30,6 +30,8 @@ tokio-rustls = { workspace = true, optional = true }
 
 # Observability (optional)
 prometheus = { workspace = true, optional = true }
+config = "0.14"
+bytes = { version = "1.5", features = ["serde"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
