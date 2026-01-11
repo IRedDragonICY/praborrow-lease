@@ -601,6 +601,8 @@ pub struct FileStorage<T> {
     meta_tree: sled::Tree,
     /// Log entries tree
     log_tree: sled::Tree,
+    /// Metrics for observability
+    metrics: Option<std::sync::Arc<crate::metrics::RaftMetrics>>,
     /// Phantom data for T
     _phantom: PhantomData<T>,
 }
@@ -617,7 +619,7 @@ impl<T> FileStorage<T> {
     /// - The path cannot be accessed
     /// - The database is corrupted
     /// - Snapshot integrity check fails
-    pub fn open(path: PathBuf) -> Result<Self, ConsensusError> {
+    pub fn open(path: PathBuf, metrics: Option<std::sync::Arc<crate::metrics::RaftMetrics>>) -> Result<Self, ConsensusError> {
         tracing::info!(
             path = %path.display(),
             "Opening persistent Raft storage"
@@ -639,6 +641,7 @@ impl<T> FileStorage<T> {
             db,
             meta_tree,
             log_tree,
+            metrics,
             _phantom: PhantomData,
         };
 
@@ -652,7 +655,7 @@ impl<T> FileStorage<T> {
 
     /// Creates a new storage (legacy API, prefer `open`).
     pub fn new(path: PathBuf) -> Self {
-        Self::open(path).expect("Failed to open storage")
+        Self::open(path, None).expect("Failed to open storage")
     }
 
     /// Forces all pending writes to disk.
@@ -720,6 +723,8 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
             batch.insert(&key, value);
         }
 
+        let start = std::time::Instant::now();
+        
         // Apply batch atomically
         self.log_tree
             .apply_batch(batch)
@@ -729,6 +734,10 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         self.db
             .flush()
             .map_err(|e| ConsensusError::StorageError(format!("Flush failed: {}", e)))?;
+
+        if let Some(metrics) = &self.metrics {
+            metrics.observe_disk_write(start.elapsed());
+        }
 
         tracing::trace!(
             entry_count = entries.len(),

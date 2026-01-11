@@ -60,6 +60,78 @@ impl NetworkConfig {
             ..Default::default()
         }
     }
+
+    /// Validates the configuration.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.buffer_size == 0 {
+            return Err("Buffer size must be positive".to_string());
+        }
+        if self.read_timeout.is_zero() {
+            return Err("Read timeout must be non-zero".to_string());
+        }
+        Ok(())
+    }
+
+    /// Returns a new builder for configuration.
+    pub fn builder() -> NetworkConfigBuilder {
+        NetworkConfigBuilder::default()
+    }
+}
+
+/// Builder for NetworkConfig.
+#[derive(Default)]
+pub struct NetworkConfigBuilder {
+    buffer_size: Option<usize>,
+    read_timeout: Option<Duration>,
+    initial_backoff: Option<Duration>,
+    max_backoff: Option<Duration>,
+    connect_timeout: Option<Duration>,
+    request_timeout: Option<Duration>,
+}
+
+impl NetworkConfigBuilder {
+    pub fn buffer_size(mut self, size: usize) -> Self {
+        self.buffer_size = Some(size);
+        self
+    }
+
+    pub fn read_timeout(mut self, timeout: Duration) -> Self {
+        self.read_timeout = Some(timeout);
+        self
+    }
+
+    pub fn initial_backoff(mut self, backoff: Duration) -> Self {
+        self.initial_backoff = Some(backoff);
+        self
+    }
+
+    pub fn max_backoff(mut self, backoff: Duration) -> Self {
+        self.max_backoff = Some(backoff);
+        self
+    }
+
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = Some(timeout);
+        self
+    }
+
+    pub fn request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = Some(timeout);
+        self
+    }
+
+    pub fn build(self) -> Result<NetworkConfig, String> {
+        let config = NetworkConfig {
+            buffer_size: self.buffer_size.unwrap_or(MAX_PACKET_SIZE).min(MAX_PACKET_SIZE),
+            read_timeout: self.read_timeout.unwrap_or(DEFAULT_READ_TIMEOUT),
+            initial_backoff: self.initial_backoff.unwrap_or(INITIAL_BACKOFF),
+            max_backoff: self.max_backoff.unwrap_or(MAX_BACKOFF),
+            connect_timeout: self.connect_timeout.unwrap_or(Duration::from_secs(5)),
+            request_timeout: self.request_timeout.unwrap_or(Duration::from_secs(10)),
+        };
+        config.validate()?;
+        Ok(config)
+    }
 }
 
 // ============================================================================

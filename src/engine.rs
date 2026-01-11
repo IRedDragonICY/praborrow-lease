@@ -88,6 +88,77 @@ impl RaftConfig {
         let timeout_ms = rand::rng().random_range(min..=max);
         Duration::from_millis(timeout_ms)
     }
+
+    /// Validates the configuration.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.election_timeout_min >= self.election_timeout_max {
+            return Err("election_timeout_min must be less than election_timeout_max".to_string());
+        }
+        if self.heartbeat_interval >= self.election_timeout_min {
+            return Err("heartbeat_interval must be less than election_timeout_min".to_string());
+        }
+        if self.rpc_timeout.is_zero() {
+            return Err("rpc_timeout must be non-zero".to_string());
+        }
+        if self.max_entries_per_rpc == 0 {
+            return Err("max_entries_per_rpc must be positive".to_string());
+        }
+        Ok(())
+    }
+
+    /// Returns a new builder for configuration.
+    pub fn builder() -> RaftConfigBuilder {
+        RaftConfigBuilder::default()
+    }
+}
+
+/// Builder for RaftConfig.
+#[derive(Default)]
+pub struct RaftConfigBuilder {
+    election_timeout_min: Option<Duration>,
+    election_timeout_max: Option<Duration>,
+    heartbeat_interval: Option<Duration>,
+    rpc_timeout: Option<Duration>,
+    max_entries_per_rpc: Option<usize>,
+}
+
+impl RaftConfigBuilder {
+    pub fn election_timeout_min(mut self, timeout: Duration) -> Self {
+        self.election_timeout_min = Some(timeout);
+        self
+    }
+
+    pub fn election_timeout_max(mut self, timeout: Duration) -> Self {
+        self.election_timeout_max = Some(timeout);
+        self
+    }
+
+    pub fn heartbeat_interval(mut self, interval: Duration) -> Self {
+        self.heartbeat_interval = Some(interval);
+        self
+    }
+
+    pub fn rpc_timeout(mut self, timeout: Duration) -> Self {
+        self.rpc_timeout = Some(timeout);
+        self
+    }
+
+    pub fn max_entries_per_rpc(mut self, max: usize) -> Self {
+        self.max_entries_per_rpc = Some(max);
+        self
+    }
+
+    pub fn build(self) -> Result<RaftConfig, String> {
+        let config = RaftConfig {
+            election_timeout_min: self.election_timeout_min.unwrap_or_else(default_election_min),
+            election_timeout_max: self.election_timeout_max.unwrap_or_else(default_election_max),
+            heartbeat_interval: self.heartbeat_interval.unwrap_or_else(default_heartbeat),
+            rpc_timeout: self.rpc_timeout.unwrap_or_else(default_rpc_timeout),
+            max_entries_per_rpc: self.max_entries_per_rpc.unwrap_or_else(default_max_entries),
+        };
+        config.validate()?;
+        Ok(config)
+    }
 }
 
 /// Types of consensus algorithms supported.
@@ -128,8 +199,12 @@ pub enum ConsensusError {
     ConfigChangeError(String),
     #[error("Configuration change in progress")]
     ConfigChangeInProgress,
+    #[cfg(feature = "grpc")]
+    #[error("TLS error")]
+    Tls(#[from] tonic::transport::Error),
+    #[cfg(not(feature = "grpc"))]
     #[error("TLS error: {0}")]
-    TlsError(String),
+    Tls(String),
     #[error("Shutdown requested")]
     Shutdown,
 }
@@ -142,16 +217,11 @@ impl From<NetworkError> for ConsensusError {
 
 impl From<Box<dyn std::error::Error>> for ConsensusError {
     fn from(e: Box<dyn std::error::Error>) -> Self {
-        ConsensusError::TlsError(e.to_string())
+        ConsensusError::NetworkError(e.to_string())
     }
 }
 
-#[cfg(feature = "grpc")]
-impl From<tonic::transport::Error> for ConsensusError {
-    fn from(e: tonic::transport::Error) -> Self {
-        ConsensusError::TlsError(e.to_string())
-    }
-}
+// impl From<tonic::transport::Error> is handled by #[from] on the variant
 
 // ============================================================================
 // CONSENSUS ENGINE TRAIT
@@ -978,7 +1048,11 @@ where
         // 2. A majority of matchIndex[i] >= N
         // 3. log[N].term == currentTerm
 
-        for n in (self.commit_index + 1)..=log_info.last_index {
+        for (i, n) in ((self.commit_index + 1)..=log_info.last_index).enumerate() {
+            // Anti-blocking yield
+            if i % 100 == 0 {
+                tokio::task::yield_now().await;
+            }
             // Check if entry at N has current term
             let entry = self.storage.get_log_entry(n).await?;
             if entry.as_ref().map(|e| e.term) != Some(current_term) {

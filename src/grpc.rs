@@ -349,6 +349,7 @@ pub struct GrpcTransport<T> {
     config: GrpcConfig,
     inbox: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<RaftMessage<T>>>>,
     inbox_sender: tokio::sync::mpsc::Sender<RaftMessage<T>>,
+    metrics: Option<std::sync::Arc<crate::metrics::RaftMetrics>>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -356,7 +357,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
     GrpcTransport<T>
 {
     /// Creates a new gRPC transport.
-    pub fn new(node_id: NodeId, config: GrpcConfig) -> Self {
+    pub fn new(node_id: NodeId, config: GrpcConfig, metrics: Option<std::sync::Arc<crate::metrics::RaftMetrics>>) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(1000);
 
         Self {
@@ -366,6 +367,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             config,
             inbox: Arc::new(tokio::sync::Mutex::new(rx)),
             inbox_sender: tx,
+            metrics,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -467,10 +469,18 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             })
             .await?;
 
+        if let Some(metrics) = &self.metrics {
+             metrics.observe_rpc("request_vote", start.elapsed());
+        }
+
+        let response_term = response.term;
+        let response_vote = response.vote_granted;
+        let response_from = response.from_id as u128; // Extract before move if needed
+
         Ok(Some(RaftMessage::RequestVoteResponse {
-            term: response.term,
-            vote_granted: response.vote_granted,
-            from_id: response.from_id as u128,
+            term: response_term,
+            vote_granted: response_vote,
+            from_id: response_from,
         }))
     }
 
@@ -484,6 +494,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
         entries: Vec<LogEntry<T>>,
         leader_commit: LogIndex,
     ) -> Result<Option<RaftMessage<T>>, NetworkError> {
+        let start = std::time::Instant::now();
         let peers = self.peers.read().await;
         let peer = peers
             .get(&peer_id)
@@ -530,6 +541,10 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             })
             .await?;
 
+        if let Some(metrics) = &self.metrics {
+             metrics.observe_rpc("append_entries", start.elapsed());
+        }
+
         Ok(Some(RaftMessage::AppendEntriesResponse {
             term: response.term,
             success: response.success,
@@ -545,6 +560,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
         leader_id: NodeId,
         snapshot: Snapshot<T>,
     ) -> Result<Option<RaftMessage<T>>, NetworkError> {
+        let start = std::time::Instant::now();
         let peers = self.peers.read().await;
         let peer = peers
             .get(&peer_id)
@@ -582,6 +598,10 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
                 })
             })
             .await?;
+
+        if let Some(metrics) = &self.metrics {
+             metrics.observe_rpc("install_snapshot", start.elapsed());
+        }
 
         Ok(Some(RaftMessage::InstallSnapshotResponse {
             term: response.term,

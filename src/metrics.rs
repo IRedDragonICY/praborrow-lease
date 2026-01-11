@@ -41,6 +41,12 @@ struct RaftMetricsInner {
     // Timing (stored as nanoseconds)
     last_heartbeat_ns: AtomicI64,
     election_timeout_ns: AtomicU64,
+
+    // Histograms (Observability)
+    #[cfg(feature = "observability")]
+    disk_write_duration: prometheus::Histogram,
+    #[cfg(feature = "observability")]
+    rpc_latency: prometheus::HistogramVec,
 }
 
 impl RaftMetrics {
@@ -61,10 +67,22 @@ impl RaftMetrics {
                 proposals_total: AtomicU64::new(0),
                 proposals_failed: AtomicU64::new(0),
                 heartbeats_sent: AtomicU64::new(0),
-                append_entries_sent: AtomicU64::new(0),
+                append_entries_sent: AtomicU64::new(0), // Added missing field
                 append_entries_received: AtomicU64::new(0),
                 last_heartbeat_ns: AtomicI64::new(0),
                 election_timeout_ns: AtomicU64::new(0),
+                #[cfg(feature = "observability")]
+                disk_write_duration: prometheus::register_histogram!(
+                    "raft_disk_write_duration_seconds",
+                    "Disk write duration in seconds",
+                    prometheus::DEFAULT_BUCKETS.to_vec()
+                ).unwrap(),
+                #[cfg(feature = "observability")]
+                rpc_latency: prometheus::register_histogram_vec!(
+                    "raft_rpc_latency_seconds",
+                    "RPC latency in seconds",
+                    &["method"]
+                ).unwrap(),
             }),
         }
     }
@@ -174,6 +192,25 @@ impl RaftMetrics {
         self.inner
             .election_timeout_ns
             .store(timeout_ns, Ordering::Relaxed);
+    }
+
+    // ========================================================================
+    // OBSERVABILITY
+    // ========================================================================
+
+    /// Observes a disk write duration.
+    pub fn observe_disk_write(&self, duration: std::time::Duration) {
+        let _ = duration;
+        #[cfg(feature = "observability")]
+        self.inner.disk_write_duration.observe(duration.as_secs_f64());
+    }
+
+    /// Observes an RPC latency.
+    pub fn observe_rpc(&self, method: &str, duration: std::time::Duration) {
+        let _ = duration;
+        let _ = method;
+        #[cfg(feature = "observability")]
+        self.inner.rpc_latency.with_label_values(&[method]).observe(duration.as_secs_f64());
     }
 
     // ========================================================================
@@ -358,12 +395,13 @@ pub enum RaftRoleMetric {
     Leader = 2,
 }
 
-impl From<crate::raft::RaftRole> for RaftRoleMetric {
-    fn from(role: crate::raft::RaftRole) -> Self {
+impl RaftRoleMetric {
+    pub fn from_role(role: u64) -> Self {
         match role {
-            crate::raft::RaftRole::Follower => RaftRoleMetric::Follower,
-            crate::raft::RaftRole::Candidate => RaftRoleMetric::Candidate,
-            crate::raft::RaftRole::Leader => RaftRoleMetric::Leader,
+            0 => RaftRoleMetric::Follower,
+            1 => RaftRoleMetric::Candidate,
+            2 => RaftRoleMetric::Leader,
+            _ => RaftRoleMetric::Follower,
         }
     }
 }
@@ -504,15 +542,15 @@ mod tests {
         use crate::raft::RaftRole;
 
         assert_eq!(
-            RaftRoleMetric::from(RaftRole::Follower),
+            RaftRoleMetric::from_role(0),
             RaftRoleMetric::Follower
         );
         assert_eq!(
-            RaftRoleMetric::from(RaftRole::Candidate),
+            RaftRoleMetric::from_role(1),
             RaftRoleMetric::Candidate
         );
         assert_eq!(
-            RaftRoleMetric::from(RaftRole::Leader),
+            RaftRoleMetric::from_role(2),
             RaftRoleMetric::Leader
         );
     }
