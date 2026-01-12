@@ -32,6 +32,7 @@ pub mod engine;
 mod manager;
 pub mod metrics;
 pub mod network;
+pub mod deadlock;
 pub mod raft;
 pub mod state_machine;
 

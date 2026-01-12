@@ -32,6 +32,7 @@ tokio-rustls = { workspace = true, optional = true }
 prometheus = { workspace = true, optional = true }
 config = "0.14"
 bytes = { version = "1.5", features = ["serde"] }
+petgraph = "0.6"
 
 [dev-dependencies]
 tokio = { workspace = true }
