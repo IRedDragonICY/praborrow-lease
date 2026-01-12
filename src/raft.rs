@@ -1549,7 +1549,7 @@ mod tests {
         }
 
         {
-            let mut storage: FileStorage<String> = FileStorage::open(path.clone()).unwrap();
+            let mut storage: FileStorage<String> = FileStorage::open(path.clone(), None).unwrap();
             storage.set_term(10).await.unwrap();
             storage.set_vote(Some(1)).await.unwrap();
 
@@ -1559,7 +1559,7 @@ mod tests {
 
         // Re-open
         {
-            let storage: FileStorage<String> = FileStorage::open(path.clone()).unwrap();
+            let storage: FileStorage<String> = FileStorage::open(path.clone(), None).unwrap();
             assert_eq!(storage.get_term().await.unwrap(), 10);
             assert_eq!(storage.get_vote().await.unwrap(), Some(1));
 
@@ -1582,12 +1582,12 @@ mod tests {
         }
 
         {
-            let mut storage: FileStorage<String> = FileStorage::open(path.clone()).unwrap();
+            let mut storage: FileStorage<String> = FileStorage::open(path.clone(), None).unwrap();
             storage.set_term_and_vote(5, Some(42)).await.unwrap();
         }
 
         {
-            let storage: FileStorage<String> = FileStorage::open(path.clone()).unwrap();
+            let storage: FileStorage<String> = FileStorage::open(path.clone(), None).unwrap();
             assert_eq!(storage.get_term().await.unwrap(), 5);
             assert_eq!(storage.get_vote().await.unwrap(), Some(42));
         }
@@ -1602,7 +1602,7 @@ mod tests {
             std::fs::remove_dir_all(&path).unwrap();
         }
 
-        let mut storage: FileStorage<String> = FileStorage::open(path.clone()).unwrap();
+        let mut storage: FileStorage<String> = FileStorage::open(path.clone(), None).unwrap();
 
         // Add entries
         let entries: Vec<LogEntry<String>> = (1..=5)
@@ -1629,7 +1629,7 @@ mod tests {
         }
 
         {
-            let mut storage: FileStorage<String> = FileStorage::open(path.clone()).unwrap();
+            let mut storage: FileStorage<String> = FileStorage::open(path.clone(), None).unwrap();
 
             // Add log entries
             let entries: Vec<LogEntry<String>> = (1..=10)
@@ -1644,7 +1644,7 @@ mod tests {
 
         // Re-open and verify
         {
-            let storage: FileStorage<String> = FileStorage::open(path.clone()).unwrap();
+            let storage: FileStorage<String> = FileStorage::open(path.clone(), None).unwrap();
 
             let snapshot = storage.get_snapshot().await.unwrap().unwrap();
             assert_eq!(snapshot.last_included_index, 5);
