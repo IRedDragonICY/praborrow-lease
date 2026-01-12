@@ -27,7 +27,7 @@ impl ConsensusNetwork for MockNetwork {
 #[tokio::test]
 async fn test_leader_election_start() {
     let storage: Box<dyn RaftStorage<String>> = Box::new(InMemoryStorage::new());
-    let mut node = RaftNode::<String>::new(1, Box::new(MockNetwork), storage);
+    let mut node = RaftNode::<String>::new(1, Box::new(MockNetwork), storage, Default::default());
 
     assert_eq!(node.storage.get_term().await.unwrap(), 0);
     assert_eq!(node.role, RaftRole::Follower);
@@ -43,7 +43,7 @@ async fn test_leader_election_start() {
 #[tokio::test]
 async fn test_vote_handling() {
     let storage: Box<dyn RaftStorage<String>> = Box::new(InMemoryStorage::new());
-    let mut node = RaftNode::<String>::new(1, Box::new(MockNetwork), storage);
+    let mut node = RaftNode::<String>::new(1, Box::new(MockNetwork), storage, Default::default());
 
     // Receive vote request from 2 for term 1
     let granted = node.handle_request_vote(1, 2).await;
