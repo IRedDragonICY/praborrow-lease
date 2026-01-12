@@ -66,4 +66,3 @@ async fn test_raft_node_with_memory_storage() {
     assert_eq!(node.role, RaftRole::Follower);
     assert_eq!(node.storage.get_term().await.unwrap(), 0);
 }
-

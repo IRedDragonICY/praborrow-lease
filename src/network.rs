@@ -122,7 +122,10 @@ impl NetworkConfigBuilder {
 
     pub fn build(self) -> Result<NetworkConfig, String> {
         let config = NetworkConfig {
-            buffer_size: self.buffer_size.unwrap_or(MAX_PACKET_SIZE).min(MAX_PACKET_SIZE),
+            buffer_size: self
+                .buffer_size
+                .unwrap_or(MAX_PACKET_SIZE)
+                .min(MAX_PACKET_SIZE),
             read_timeout: self.read_timeout.unwrap_or(DEFAULT_READ_TIMEOUT),
             initial_backoff: self.initial_backoff.unwrap_or(INITIAL_BACKOFF),
             max_backoff: self.max_backoff.unwrap_or(MAX_BACKOFF),

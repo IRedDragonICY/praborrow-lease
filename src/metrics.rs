@@ -76,13 +76,15 @@ impl RaftMetrics {
                     "raft_disk_write_duration_seconds",
                     "Disk write duration in seconds",
                     prometheus::DEFAULT_BUCKETS.to_vec()
-                ).unwrap(),
+                )
+                .unwrap(),
                 #[cfg(feature = "observability")]
                 rpc_latency: prometheus::register_histogram_vec!(
                     "raft_rpc_latency_seconds",
                     "RPC latency in seconds",
                     &["method"]
-                ).unwrap(),
+                )
+                .unwrap(),
             }),
         }
     }
@@ -202,7 +204,9 @@ impl RaftMetrics {
     pub fn observe_disk_write(&self, duration: std::time::Duration) {
         let _ = duration;
         #[cfg(feature = "observability")]
-        self.inner.disk_write_duration.observe(duration.as_secs_f64());
+        self.inner
+            .disk_write_duration
+            .observe(duration.as_secs_f64());
     }
 
     /// Observes an RPC latency.
@@ -210,7 +214,10 @@ impl RaftMetrics {
         let _ = duration;
         let _ = method;
         #[cfg(feature = "observability")]
-        self.inner.rpc_latency.with_label_values(&[method]).observe(duration.as_secs_f64());
+        self.inner
+            .rpc_latency
+            .with_label_values(&[method])
+            .observe(duration.as_secs_f64());
     }
 
     // ========================================================================
@@ -541,17 +548,8 @@ mod tests {
     fn test_role_metric_conversion() {
         use crate::raft::RaftRole;
 
-        assert_eq!(
-            RaftRoleMetric::from_role(0),
-            RaftRoleMetric::Follower
-        );
-        assert_eq!(
-            RaftRoleMetric::from_role(1),
-            RaftRoleMetric::Candidate
-        );
-        assert_eq!(
-            RaftRoleMetric::from_role(2),
-            RaftRoleMetric::Leader
-        );
+        assert_eq!(RaftRoleMetric::from_role(0), RaftRoleMetric::Follower);
+        assert_eq!(RaftRoleMetric::from_role(1), RaftRoleMetric::Candidate);
+        assert_eq!(RaftRoleMetric::from_role(2), RaftRoleMetric::Leader);
     }
 }

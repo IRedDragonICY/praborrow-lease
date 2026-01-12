@@ -1,4 +1,5 @@
-use crate::engine::ConsensusError;
+use crate::builder::RaftNodeBuilder;
+use crate::engine::{ConsensusError, RaftConfig};
 use crate::network::ConsensusNetwork;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -43,10 +44,7 @@ pub enum ClusterConfig {
     /// Single configuration (normal operation)
     Single(Vec<NodeId>),
     /// Joint configuration during transition (old, new)
-    Joint {
-        old: Vec<NodeId>,
-        new: Vec<NodeId>,
-    },
+    Joint { old: Vec<NodeId>, new: Vec<NodeId> },
 }
 
 impl ClusterConfig {
@@ -171,6 +169,25 @@ impl<T> LogEntry<T> {
             index,
             term,
             command: LogCommand::NoOp,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum VersionedLogEntry<T> {
+    V0(LogEntry<T>),
+}
+
+impl<T> From<LogEntry<T>> for VersionedLogEntry<T> {
+    fn from(entry: LogEntry<T>) -> Self {
+        VersionedLogEntry::V0(entry)
+    }
+}
+
+impl<T> From<VersionedLogEntry<T>> for LogEntry<T> {
+    fn from(versioned: VersionedLogEntry<T>) -> Self {
+        match versioned {
+            VersionedLogEntry::V0(entry) => entry,
         }
     }
 }
@@ -417,7 +434,8 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         &self,
         start: LogIndex,
         end: LogIndex,
-    ) -> Result<Box<dyn Iterator<Item = Result<LogEntry<T>, ConsensusError>> + Send>, ConsensusError> {
+    ) -> Result<Box<dyn Iterator<Item = Result<LogEntry<T>, ConsensusError>> + Send>, ConsensusError>
+    {
         if start >= end {
             return Ok(Box::new(std::iter::empty()));
         }
@@ -472,8 +490,10 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
 
     async fn get_log(
         &self,
-    ) -> Result<Box<dyn Iterator<Item = Result<LogEntry<T>, ConsensusError>> + Send>, ConsensusError> {
-        let entries: Vec<Result<LogEntry<T>, ConsensusError>> = self.log.iter().cloned().map(Ok).collect();
+    ) -> Result<Box<dyn Iterator<Item = Result<LogEntry<T>, ConsensusError>> + Send>, ConsensusError>
+    {
+        let entries: Vec<Result<LogEntry<T>, ConsensusError>> =
+            self.log.iter().cloned().map(Ok).collect();
         Ok(Box::new(entries.into_iter()))
     }
 
@@ -619,7 +639,10 @@ impl<T> FileStorage<T> {
     /// - The path cannot be accessed
     /// - The database is corrupted
     /// - Snapshot integrity check fails
-    pub fn open(path: PathBuf, metrics: Option<std::sync::Arc<crate::metrics::RaftMetrics>>) -> Result<Self, ConsensusError> {
+    pub fn open(
+        path: PathBuf,
+        metrics: Option<std::sync::Arc<crate::metrics::RaftMetrics>>,
+    ) -> Result<Self, ConsensusError> {
         tracing::info!(
             path = %path.display(),
             "Opening persistent Raft storage"
@@ -708,7 +731,9 @@ pub struct StorageStats {
 }
 
 #[async_trait]
-impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static> RaftStorage<T> for FileStorage<T> {
+impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static> RaftStorage<T>
+    for FileStorage<T>
+{
     async fn append_entries(&mut self, entries: &[LogEntry<T>]) -> Result<(), ConsensusError> {
         if entries.is_empty() {
             return Ok(());
@@ -718,13 +743,14 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
 
         for entry in entries {
             let key = entry.index.to_be_bytes();
-            let value = bincode::serialize(entry)
+            let versioned: VersionedLogEntry<T> = entry.clone().into();
+            let value = bincode::serialize(&versioned)
                 .map_err(|e| ConsensusError::StorageError(format!("Serialize error: {}", e)))?;
             batch.insert(&key, value);
         }
 
         let start = std::time::Instant::now();
-        
+
         // Apply batch atomically
         self.log_tree
             .apply_batch(batch)
@@ -761,8 +787,9 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
             .get(key)
             .map_err(|e| ConsensusError::StorageError(e.to_string()))?
         {
-            let entry: LogEntry<T> = bincode::deserialize(&val)
+            let versioned: VersionedLogEntry<T> = bincode::deserialize(&val)
                 .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            let entry: LogEntry<T> = versioned.into();
             Ok(Some(entry))
         } else {
             Ok(None)
@@ -773,7 +800,8 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         &self,
         start: LogIndex,
         end: LogIndex,
-    ) -> Result<Box<dyn Iterator<Item = Result<LogEntry<T>, ConsensusError>> + Send>, ConsensusError> {
+    ) -> Result<Box<dyn Iterator<Item = Result<LogEntry<T>, ConsensusError>> + Send>, ConsensusError>
+    {
         if start >= end {
             return Ok(Box::new(std::iter::empty()));
         }
@@ -785,7 +813,9 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
 
         let iter = self.log_tree.range(start_key..end_key).map(|res| {
             let (_, val) = res.map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-            bincode::deserialize(&val).map_err(|e| ConsensusError::StorageError(e.to_string()))
+            let versioned: VersionedLogEntry<T> = bincode::deserialize(&val)
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            Ok(versioned.into())
         });
 
         Ok(Box::new(iter))
@@ -872,10 +902,13 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
 
     async fn get_log(
         &self,
-    ) -> Result<Box<dyn Iterator<Item = Result<LogEntry<T>, ConsensusError>> + Send>, ConsensusError> {
+    ) -> Result<Box<dyn Iterator<Item = Result<LogEntry<T>, ConsensusError>> + Send>, ConsensusError>
+    {
         let iter = self.log_tree.iter().map(|res| {
             let (_, val) = res.map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-            bincode::deserialize(&val).map_err(|e| ConsensusError::StorageError(e.to_string()))
+            let versioned: VersionedLogEntry<T> = bincode::deserialize(&val)
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            Ok(versioned.into())
         });
         Ok(Box::new(iter))
     }
@@ -888,8 +921,9 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
             .map_err(|e| ConsensusError::StorageError(e.to_string()))?
         {
             let (_, value) = result;
-            let entry: LogEntry<T> = bincode::deserialize(&value)
+            let versioned: VersionedLogEntry<T> = bincode::deserialize(&value)
                 .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            let entry: LogEntry<T> = versioned.into();
             return Ok(LogInfo {
                 last_index: entry.index,
                 last_term: entry.term,
@@ -1105,6 +1139,9 @@ pub struct RaftNode<T: Send + Sync> {
 
     // Networking
     pub network: Box<dyn ConsensusNetwork>,
+
+    // Configuration
+    pub config: RaftConfig,
 }
 
 impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static> RaftNode<T> {
@@ -1138,11 +1175,9 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         id: NodeId,
         network: Box<dyn ConsensusNetwork>,
         storage: Box<dyn RaftStorage<T>>,
+        config: RaftConfig,
     ) -> Self {
-        tracing::info!(
-            node_id = id,
-            "Creating new Raft node"
-        );
+        tracing::info!(node_id = id, "Creating new Raft node");
 
         Self {
             storage,
@@ -1153,6 +1188,7 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
             role: RaftRole::Follower,
             id,
             network,
+            config,
         }
     }
 
@@ -1174,7 +1210,17 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
     /// Convenience method for testing and development.
     /// For production, use `new()` with a persistent storage backend.
     pub fn with_memory_storage(id: NodeId, network: Box<dyn ConsensusNetwork>) -> Self {
-        Self::new(id, network, Box::new(InMemoryStorage::new()))
+        Self::new(
+            id,
+            network,
+            Box::new(InMemoryStorage::new()),
+            RaftConfig::default(),
+        )
+    }
+
+    /// Returns a new fluent builder for constructing a RaftNode.
+    pub fn builder() -> RaftNodeBuilder<T> {
+        RaftNodeBuilder::new()
     }
 
     /// Transition to Candidate and start election.
@@ -1183,7 +1229,10 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         let new_term = current_term + 1;
 
         // Atomically update term and vote for self
-        let _ = self.storage.set_term_and_vote(new_term, Some(self.id)).await;
+        let _ = self
+            .storage
+            .set_term_and_vote(new_term, Some(self.id))
+            .await;
 
         let old_role = self.role.clone();
         self.role = RaftRole::Candidate;
@@ -1295,7 +1344,10 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
     ///
     /// ⚠️ WARNING: This method is NOT safe for concurrent membership changes.
     /// Use `propose_conf_change` for production deployments.
-    #[deprecated(since = "0.7.2", note = "Use propose_conf_change for Joint Consensus safety")]
+    #[deprecated(
+        since = "0.7.2",
+        note = "Use propose_conf_change for Joint Consensus safety"
+    )]
     pub async fn add_node(&mut self, peer_address: String) -> Result<(), ConsensusError> {
         let mut peers = self.storage.get_peers().await?;
         if !peers.contains(&peer_address) {
@@ -1317,7 +1369,10 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
     }
 
     /// Removes a peer from the cluster configuration (LEGACY - use propose_conf_change for safety).
-    #[deprecated(since = "0.7.2", note = "Use propose_conf_change for Joint Consensus safety")]
+    #[deprecated(
+        since = "0.7.2",
+        note = "Use propose_conf_change for Joint Consensus safety"
+    )]
     pub async fn remove_node(&mut self, peer_address: &str) -> Result<(), ConsensusError> {
         let mut peers = self.storage.get_peers().await?;
         if let Some(pos) = peers.iter().position(|p| p == peer_address) {
@@ -1393,9 +1448,11 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
                 }
                 nodes
             }
-            ConfChange::RemoveNode(node_id) => {
-                old_nodes.iter().filter(|n| *n != node_id).copied().collect()
-            }
+            ConfChange::RemoveNode(node_id) => old_nodes
+                .iter()
+                .filter(|n| *n != node_id)
+                .copied()
+                .collect(),
         };
 
         let joint_config = ClusterConfig::Joint {
@@ -1433,7 +1490,7 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         match joint_config {
             ClusterConfig::Joint { old: _, new } => {
                 let final_config = ClusterConfig::Single(new.clone());
-                
+
                 tracing::info!(
                     node_id = self.id,
                     new_config_size = new.len(),
@@ -1442,11 +1499,9 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
 
                 Ok(final_config)
             }
-            ClusterConfig::Single(_) => {
-                Err(ConsensusError::ConfigChangeError(
-                    "Cannot finalize: not in Joint state".to_string(),
-                ))
-            }
+            ClusterConfig::Single(_) => Err(ConsensusError::ConfigChangeError(
+                "Cannot finalize: not in Joint state".to_string(),
+            )),
         }
     }
 }
@@ -1498,7 +1553,12 @@ mod tests {
         }
 
         // Test get_log_range
-        let range: Vec<LogEntry<String>> = storage.get_log_range(2, 4).await.unwrap().collect::<Result<_, _>>().unwrap();
+        let range: Vec<LogEntry<String>> = storage
+            .get_log_range(2, 4)
+            .await
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
         assert_eq!(range.len(), 2);
         assert_eq!(range[0].index, 2);
         assert_eq!(range[1].index, 3);
@@ -1563,7 +1623,12 @@ mod tests {
             assert_eq!(storage.get_term().await.unwrap(), 10);
             assert_eq!(storage.get_vote().await.unwrap(), Some(1));
 
-            let log: Vec<LogEntry<String>> = storage.get_log().await.unwrap().collect::<Result<_, _>>().unwrap();
+            let log: Vec<LogEntry<String>> = storage
+                .get_log()
+                .await
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
             assert_eq!(log.len(), 1);
             if let LogCommand::App(cmd) = &log[0].command {
                 assert_eq!(cmd, "test_persist");
@@ -1613,7 +1678,12 @@ mod tests {
         // Truncate
         storage.truncate_log(3).await.unwrap();
 
-        let log: Vec<LogEntry<String>> = storage.get_log().await.unwrap().collect::<Result<_, _>>().unwrap();
+        let log: Vec<LogEntry<String>> = storage
+            .get_log()
+            .await
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
         assert_eq!(log.len(), 2);
         assert_eq!(log[0].index, 1);
         assert_eq!(log[1].index, 2);
@@ -1651,7 +1721,12 @@ mod tests {
             assert_eq!(snapshot.data, "state_at_5");
 
             // Log should only have entries 6-10
-            let log: Vec<LogEntry<String>> = storage.get_log().await.unwrap().collect::<Result<_, _>>().unwrap();
+            let log: Vec<LogEntry<String>> = storage
+                .get_log()
+                .await
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
             assert_eq!(log.len(), 5);
             assert_eq!(log[0].index, 6);
         }
@@ -1702,7 +1777,12 @@ mod tests {
 
         let shared_peers = std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let network = Box::new(SharedMockNetwork(shared_peers.clone()));
-        let mut node = RaftNode::new(1, network, Box::new(InMemoryStorage::<String>::new()));
+        let mut node = RaftNode::new(
+            1,
+            network,
+            Box::new(InMemoryStorage::<String>::new()),
+            RaftConfig::default(),
+        );
 
         // Initial state
         assert!(node.storage.get_peers().await.unwrap().is_empty());
@@ -1734,4 +1814,3 @@ mod tests {
         assert!(shared_peers.read().unwrap().is_empty());
     }
 }
-

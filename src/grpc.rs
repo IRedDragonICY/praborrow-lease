@@ -20,11 +20,13 @@ pub mod proto {
 
 use proto::raft_client::RaftClient;
 use proto::raft_server::{Raft, RaftServer};
+use std::fs;
 use tonic::{
     Request, Response, Status,
-    transport::{Channel, Endpoint, Server, Certificate, Identity, ClientTlsConfig, ServerTlsConfig},
+    transport::{
+        Certificate, Channel, ClientTlsConfig, Endpoint, Identity, Server, ServerTlsConfig,
+    },
 };
-use std::fs;
 
 // ============================================================================
 // CONFIGURATION
@@ -271,25 +273,29 @@ impl ConnectionPool {
             .timeout(self.config.request_timeout);
 
         let endpoint = if let Some(tls) = &self.config.tls {
-             let pem = fs::read_to_string(&tls.ca_cert)
-                .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to read CA cert: {}", e)))?;
-             let ca = Certificate::from_pem(pem);
+            let pem = fs::read_to_string(&tls.ca_cert).map_err(|e| {
+                NetworkError::ConnectionFailed(format!("Failed to read CA cert: {}", e))
+            })?;
+            let ca = Certificate::from_pem(pem);
 
-             let mut tls_config = ClientTlsConfig::new()
+            let mut tls_config = ClientTlsConfig::new()
                 .ca_certificate(ca)
                 .domain_name(tls.domain_name.as_deref().unwrap_or("localhost"));
 
-             if let (Some(cert_path), Some(key_path)) = (&tls.client_cert, &tls.client_key) {
-                 let cert = fs::read_to_string(cert_path)
-                    .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to read client cert: {}", e)))?;
-                 let key = fs::read_to_string(key_path)
-                    .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to read client key: {}", e)))?;
-                 let identity = Identity::from_pem(cert, key);
-                 tls_config = tls_config.identity(identity);
-             }
+            if let (Some(cert_path), Some(key_path)) = (&tls.client_cert, &tls.client_key) {
+                let cert = fs::read_to_string(cert_path).map_err(|e| {
+                    NetworkError::ConnectionFailed(format!("Failed to read client cert: {}", e))
+                })?;
+                let key = fs::read_to_string(key_path).map_err(|e| {
+                    NetworkError::ConnectionFailed(format!("Failed to read client key: {}", e))
+                })?;
+                let identity = Identity::from_pem(cert, key);
+                tls_config = tls_config.identity(identity);
+            }
 
-             endpoint.tls_config(tls_config)
-                .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to configure TLS: {}", e)))?
+            endpoint.tls_config(tls_config).map_err(|e| {
+                NetworkError::ConnectionFailed(format!("Failed to configure TLS: {}", e))
+            })?
         } else {
             endpoint
         };
@@ -357,7 +363,11 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
     GrpcTransport<T>
 {
     /// Creates a new gRPC transport.
-    pub fn new(node_id: NodeId, config: GrpcConfig, metrics: Option<std::sync::Arc<crate::metrics::RaftMetrics>>) -> Self {
+    pub fn new(
+        node_id: NodeId,
+        config: GrpcConfig,
+        metrics: Option<std::sync::Arc<crate::metrics::RaftMetrics>>,
+    ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(1000);
 
         Self {
@@ -437,6 +447,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
         last_log_index: LogIndex,
         last_log_term: Term,
     ) -> Result<Option<RaftMessage<T>>, NetworkError> {
+        let start = std::time::Instant::now();
         let peers = self.peers.read().await;
         let peer = peers
             .get(&peer_id)
@@ -470,7 +481,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             .await?;
 
         if let Some(metrics) = &self.metrics {
-             metrics.observe_rpc("request_vote", start.elapsed());
+            metrics.observe_rpc("request_vote", start.elapsed());
         }
 
         let response_term = response.term;
@@ -542,7 +553,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             .await?;
 
         if let Some(metrics) = &self.metrics {
-             metrics.observe_rpc("append_entries", start.elapsed());
+            metrics.observe_rpc("append_entries", start.elapsed());
         }
 
         Ok(Some(RaftMessage::AppendEntriesResponse {
@@ -600,7 +611,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             .await?;
 
         if let Some(metrics) = &self.metrics {
-             metrics.observe_rpc("install_snapshot", start.elapsed());
+            metrics.observe_rpc("install_snapshot", start.elapsed());
         }
 
         Ok(Some(RaftMessage::InstallSnapshotResponse {
@@ -618,7 +629,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             .ok_or(NetworkError::TransportError("Channel closed".into()))
     }
 
-    async fn respond(&self, to: NodeId, message: RaftMessage<T>) -> Result<(), NetworkError> {
+    async fn respond(&self, _to: NodeId, _message: RaftMessage<T>) -> Result<(), NetworkError> {
         // For gRPC, responses are sent synchronously in the RPC handler
         // This is a no-op for the client side
         Ok(())
@@ -783,8 +794,6 @@ pub async fn start_grpc_server<
     let addr = bind_addr.parse()?;
     let server = RaftGrpcServer::new(node_id, inbox_sender);
 
-    let server = RaftGrpcServer::new(node_id, inbox_sender);
-
     tracing::info!(addr = bind_addr, "Starting gRPC server");
 
     let mut builder = Server::builder();
@@ -793,9 +802,9 @@ pub async fn start_grpc_server<
         let cert = fs::read_to_string(&tls.server_cert)?;
         let key = fs::read_to_string(&tls.server_key)?;
         let identity = Identity::from_pem(cert, key);
-        
+
         let mut tls_config = ServerTlsConfig::new().identity(identity);
-        
+
         // Emable mTLS by requiring client auth with the CA
         let ca_pem = fs::read_to_string(&tls.ca_cert)?;
         let client_ca = Certificate::from_pem(ca_pem);

@@ -5,9 +5,9 @@ use std::collections::HashMap;
 type NodeId = u128;
 
 /// A directed graph representing "Process A is waiting for Resource B".
-/// 
+///
 /// - Nodes: Resource IDs and Lease Holder IDs.
-/// - Edges: 
+/// - Edges:
 ///   - (Holder -> Resource): Holder requests lease.
 ///   - (Resource -> Holder): Resource is currently leased by Holder.
 #[derive(Debug, Default)]
@@ -29,19 +29,27 @@ impl WaitForGraph {
 
     /// Records a new dependency: `who` is waiting for `what`.
     pub fn add_wait(&mut self, who: NodeId, what: NodeId) {
-        let who_idx = *self.node_map.entry(who).or_insert_with(|| self.graph.add_node(who));
-        let what_idx = *self.node_map.entry(what).or_insert_with(|| self.graph.add_node(what));
-        
+        let who_idx = *self
+            .node_map
+            .entry(who)
+            .or_insert_with(|| self.graph.add_node(who));
+        let what_idx = *self
+            .node_map
+            .entry(what)
+            .or_insert_with(|| self.graph.add_node(what));
+
         // Add edge if not already present (simplified mainly for stub)
         self.graph.update_edge(who_idx, what_idx, ());
     }
 
     /// Removes a dependency when a resource is acquired or request cancelled.
     pub fn remove_wait(&mut self, who: NodeId, what: NodeId) {
-        if let (Some(&who_idx), Some(&what_idx)) = (self.node_map.get(&who), self.node_map.get(&what)) {
-             if let Some(edge) = self.graph.find_edge(who_idx, what_idx) {
-                 self.graph.remove_edge(edge);
-             }
+        if let (Some(&who_idx), Some(&what_idx)) =
+            (self.node_map.get(&who), self.node_map.get(&what))
+        {
+            if let Some(edge) = self.graph.find_edge(who_idx, what_idx) {
+                self.graph.remove_edge(edge);
+            }
         }
     }
 

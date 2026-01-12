@@ -1,6 +1,12 @@
 fn main() {
     #[cfg(feature = "grpc")]
     {
+        if std::env::var("PROTOC").is_err() {
+            unsafe {
+                std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path().unwrap());
+            }
+        }
+
         let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
         tonic_build::configure()

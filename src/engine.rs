@@ -24,16 +24,28 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub struct RaftConfig {
     /// Minimum election timeout (randomized between min and max)
-    #[serde(deserialize_with = "deserialize_duration", default = "default_election_min")]
+    #[serde(
+        deserialize_with = "deserialize_duration",
+        default = "default_election_min"
+    )]
     pub election_timeout_min: Duration,
     /// Maximum election timeout
-    #[serde(deserialize_with = "deserialize_duration", default = "default_election_max")]
+    #[serde(
+        deserialize_with = "deserialize_duration",
+        default = "default_election_max"
+    )]
     pub election_timeout_max: Duration,
     /// Heartbeat interval (must be << election timeout)
-    #[serde(deserialize_with = "deserialize_duration", default = "default_heartbeat")]
+    #[serde(
+        deserialize_with = "deserialize_duration",
+        default = "default_heartbeat"
+    )]
     pub heartbeat_interval: Duration,
     /// RPC timeout
-    #[serde(deserialize_with = "deserialize_duration", default = "default_rpc_timeout")]
+    #[serde(
+        deserialize_with = "deserialize_duration",
+        default = "default_rpc_timeout"
+    )]
     pub rpc_timeout: Duration,
     /// Max entries per AppendEntries RPC
     #[serde(default = "default_max_entries")]
@@ -48,11 +60,21 @@ where
     Ok(Duration::from_millis(ms))
 }
 
-fn default_election_min() -> Duration { Duration::from_millis(150) }
-fn default_election_max() -> Duration { Duration::from_millis(300) }
-fn default_heartbeat() -> Duration { Duration::from_millis(50) }
-fn default_rpc_timeout() -> Duration { Duration::from_millis(100) }
-fn default_max_entries() -> usize { 100 }
+fn default_election_min() -> Duration {
+    Duration::from_millis(150)
+}
+fn default_election_max() -> Duration {
+    Duration::from_millis(300)
+}
+fn default_heartbeat() -> Duration {
+    Duration::from_millis(50)
+}
+fn default_rpc_timeout() -> Duration {
+    Duration::from_millis(100)
+}
+fn default_max_entries() -> usize {
+    100
+}
 
 impl Default for RaftConfig {
     fn default() -> Self {
@@ -150,8 +172,12 @@ impl RaftConfigBuilder {
 
     pub fn build(self) -> Result<RaftConfig, String> {
         let config = RaftConfig {
-            election_timeout_min: self.election_timeout_min.unwrap_or_else(default_election_min),
-            election_timeout_max: self.election_timeout_max.unwrap_or_else(default_election_max),
+            election_timeout_min: self
+                .election_timeout_min
+                .unwrap_or_else(default_election_min),
+            election_timeout_max: self
+                .election_timeout_max
+                .unwrap_or_else(default_election_max),
             heartbeat_interval: self.heartbeat_interval.unwrap_or_else(default_heartbeat),
             rpc_timeout: self.rpc_timeout.unwrap_or_else(default_rpc_timeout),
             max_entries_per_rpc: self.max_entries_per_rpc.unwrap_or_else(default_max_entries),
@@ -200,9 +226,6 @@ pub enum ConsensusError {
     #[error("Configuration change in progress")]
     ConfigChangeInProgress,
     #[cfg(feature = "grpc")]
-    #[error("TLS error")]
-    Tls(#[from] tonic::transport::Error),
-    #[cfg(not(feature = "grpc"))]
     #[error("TLS error: {0}")]
     Tls(String),
     #[error("Shutdown requested")]
@@ -221,7 +244,12 @@ impl From<Box<dyn std::error::Error>> for ConsensusError {
     }
 }
 
-// impl From<tonic::transport::Error> is handled by #[from] on the variant
+#[cfg(feature = "grpc")]
+impl From<tonic::transport::Error> for ConsensusError {
+    fn from(e: tonic::transport::Error) -> Self {
+        ConsensusError::Tls(e.to_string())
+    }
+}
 
 // ============================================================================
 // CONSENSUS ENGINE TRAIT
@@ -237,7 +265,10 @@ pub trait ConsensusEngine<T>: Send {
     async fn propose(&mut self, value: T) -> Result<LogIndex, ConsensusError>;
 
     /// Proposes a configuration change (membership change).
-    async fn propose_conf_change(&mut self, change: crate::raft::ConfChange) -> Result<LogIndex, ConsensusError>;
+    async fn propose_conf_change(
+        &mut self,
+        change: crate::raft::ConfChange,
+    ) -> Result<LogIndex, ConsensusError>;
 
     /// Returns the current leader ID, if known.
     fn leader_id(&self) -> Option<NodeId>;
@@ -404,7 +435,10 @@ where
         self.votes_received.clear();
 
         // Vote for self
-        let _ = self.storage.set_term_and_vote(new_term, Some(self.id)).await;
+        let _ = self
+            .storage
+            .set_term_and_vote(new_term, Some(self.id))
+            .await;
         self.votes_received.insert(self.id, true);
 
         tracing::info!(
@@ -580,7 +614,8 @@ where
                 vote_granted,
                 from_id,
             } => {
-                self.handle_request_vote_response(term, vote_granted, from_id).await?;
+                self.handle_request_vote_response(term, vote_granted, from_id)
+                    .await?;
             }
 
             RaftMessage::AppendEntries {
@@ -608,7 +643,8 @@ where
                 match_index,
                 from_id,
             } => {
-                self.handle_append_entries_response(term, success, match_index, from_id).await?;
+                self.handle_append_entries_response(term, success, match_index, from_id)
+                    .await?;
             }
 
             RaftMessage::InstallSnapshot {
@@ -782,7 +818,8 @@ where
             0
         } else {
             self.storage
-                .get_log_entry(prev_log_index).await?
+                .get_log_entry(prev_log_index)
+                .await?
                 .map(|e| e.term)
                 .unwrap_or(0)
         };
@@ -855,7 +892,8 @@ where
         } else {
             // Check if we have the entry at prev_log_index with matching term
             self.storage
-                .get_log_entry(prev_log_index).await?
+                .get_log_entry(prev_log_index)
+                .await?
                 .map(|e| e.term == prev_log_term)
                 .unwrap_or(false)
         };
@@ -900,12 +938,21 @@ where
                                 "Node transitioning to new configuration from log"
                             );
                             self.cluster_config = config.clone();
-                            
+
                             // Update network if needed
-                            let _ = self.network.update_peers(config.all_nodes().into_iter().map(|id| crate::network::PeerInfo {
-                                id,
-                                address: "".to_string(), // In a real system, we'd have address mapping
-                            }).collect()).await;
+                            let _ = self
+                                .network
+                                .update_peers(
+                                    config
+                                        .all_nodes()
+                                        .into_iter()
+                                        .map(|id| crate::network::PeerInfo {
+                                            id,
+                                            address: "".to_string(), // In a real system, we'd have address mapping
+                                        })
+                                        .collect(),
+                                )
+                                .await;
                         }
                     }
                 }
@@ -1129,7 +1176,10 @@ where
         Ok(new_index)
     }
 
-    async fn propose_conf_change(&mut self, change: crate::raft::ConfChange) -> Result<LogIndex, ConsensusError> {
+    async fn propose_conf_change(
+        &mut self,
+        change: crate::raft::ConfChange,
+    ) -> Result<LogIndex, ConsensusError> {
         if self.role != RaftRole::Leader {
             return Err(ConsensusError::NotLeader);
         }
@@ -1236,7 +1286,7 @@ impl<T: Clone + Send + Sync + Serialize + DeserializeOwned + 'static> LegacyRaft
         storage: Box<dyn RaftStorage<T>>,
     ) -> Self {
         Self {
-            node: crate::raft::RaftNode::new(id, network, storage),
+            node: crate::raft::RaftNode::new(id, network, storage, RaftConfig::default()),
         }
     }
 }
@@ -1261,7 +1311,10 @@ impl<T: Clone + Send + Sync + Serialize + DeserializeOwned + 'static> ConsensusE
         Err(ConsensusError::NotLeader)
     }
 
-    async fn propose_conf_change(&mut self, _change: crate::raft::ConfChange) -> Result<LogIndex, ConsensusError> {
+    async fn propose_conf_change(
+        &mut self,
+        _change: crate::raft::ConfChange,
+    ) -> Result<LogIndex, ConsensusError> {
         Err(ConsensusError::NotLeader)
     }
 
