@@ -51,6 +51,7 @@ struct RaftMetricsInner {
 
 impl RaftMetrics {
     /// Creates a new metrics instance for the given node.
+    /// Creates a new metrics instance for the given node.
     pub fn new(node_id: u128) -> Self {
         Self {
             inner: Arc::new(RaftMetricsInner {
@@ -67,7 +68,7 @@ impl RaftMetrics {
                 proposals_total: AtomicU64::new(0),
                 proposals_failed: AtomicU64::new(0),
                 heartbeats_sent: AtomicU64::new(0),
-                append_entries_sent: AtomicU64::new(0), // Added missing field
+                append_entries_sent: AtomicU64::new(0),
                 append_entries_received: AtomicU64::new(0),
                 last_heartbeat_ns: AtomicI64::new(0),
                 election_timeout_ns: AtomicU64::new(0),
@@ -77,14 +78,27 @@ impl RaftMetrics {
                     "Disk write duration in seconds",
                     prometheus::DEFAULT_BUCKETS.to_vec()
                 )
-                .unwrap(),
+                .unwrap_or_else(|_| {
+                     prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
+                        "raft_disk_write_duration_seconds",
+                        "Disk write duration in seconds",
+                     )).unwrap()
+                }),
                 #[cfg(feature = "observability")]
                 rpc_latency: prometheus::register_histogram_vec!(
                     "raft_rpc_latency_seconds",
                     "RPC latency in seconds",
                     &["method"]
                 )
-                .unwrap(),
+                .unwrap_or_else(|_| {
+                    prometheus::HistogramVec::new(
+                        prometheus::HistogramOpts::new(
+                            "raft_rpc_latency_seconds",
+                            "RPC latency in seconds",
+                        ),
+                        &["method"]
+                    ).unwrap()
+                }),
             }),
         }
     }
