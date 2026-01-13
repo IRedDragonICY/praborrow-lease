@@ -269,6 +269,8 @@ pub struct LogInfo {
 /// Implementations must handle crash recovery correctly.
 ///
 /// All methods are async to support non-blocking I/O backends (e.g., remote databases).
+use std::collections::BTreeMap;
+
 #[async_trait]
 pub trait RaftStorage<T>: Send + Sync
 where
@@ -383,7 +385,7 @@ where
 pub struct InMemoryStorage<T> {
     current_term: Term,
     voted_for: Option<NodeId>,
-    log: Vec<LogEntry<T>>,
+    log: BTreeMap<LogIndex, LogEntry<T>>,
     peers: Vec<String>,
     commit_index: LogIndex,
     snapshot: Option<Snapshot<T>>,
@@ -397,7 +399,7 @@ impl<T> InMemoryStorage<T> {
         Self {
             current_term: 0,
             voted_for: None,
-            log: Vec::new(),
+            log: BTreeMap::new(),
             peers: Vec::new(),
             commit_index: 0,
             snapshot: None,
@@ -421,13 +423,14 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
             entry_count = entries.len(),
             "Appending entries to in-memory log"
         );
-        self.log.extend_from_slice(entries);
+        for entry in entries {
+            self.log.insert(entry.index, entry.clone());
+        }
         Ok(())
     }
 
     async fn get_log_entry(&self, index: LogIndex) -> Result<Option<LogEntry<T>>, ConsensusError> {
-        // Find entry by its actual index field
-        Ok(self.log.iter().find(|e| e.index == index).cloned())
+        Ok(self.log.get(&index).cloned())
     }
 
     async fn get_log_range(
@@ -439,13 +442,10 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         if start >= end {
             return Ok(Box::new(std::iter::empty()));
         }
-        // Filter entries by their actual index field
         let entries: Vec<Result<LogEntry<T>, ConsensusError>> = self
             .log
-            .iter()
-            .filter(|e| e.index >= start && e.index < end)
-            .cloned()
-            .map(Ok)
+            .range(start..end)
+            .map(|(_, e)| Ok(e.clone()))
             .collect();
         Ok(Box::new(entries.into_iter()))
     }
@@ -493,12 +493,12 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
     ) -> Result<Box<dyn Iterator<Item = Result<LogEntry<T>, ConsensusError>> + Send>, ConsensusError>
     {
         let entries: Vec<Result<LogEntry<T>, ConsensusError>> =
-            self.log.iter().cloned().map(Ok).collect();
+            self.log.values().cloned().map(Ok).collect();
         Ok(Box::new(entries.into_iter()))
     }
 
     async fn get_last_log_info(&self) -> Result<LogInfo, ConsensusError> {
-        if let Some(entry) = self.log.last() {
+        if let Some((_, entry)) = self.log.last_key_value() {
             Ok(LogInfo {
                 last_index: entry.index,
                 last_term: entry.term,
@@ -514,8 +514,8 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
     }
 
     async fn truncate_log(&mut self, from_index: LogIndex) -> Result<(), ConsensusError> {
-        // Keep entries with index < from_index
-        self.log.retain(|e| e.index < from_index);
+        // Removes all entries with index >= from_index
+        let _removed = self.log.split_off(&from_index);
         tracing::debug!(
             from_index = from_index,
             remaining = self.log.len(),
@@ -551,7 +551,8 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         self.snapshot = Some(snapshot);
 
         // Remove entries with index <= compact_up_to
-        self.log.retain(|e| e.index > compact_up_to);
+        // split_off returns entries >= (compact_up_to + 1), which we want to KEEP
+        self.log = self.log.split_off(&(compact_up_to + 1));
         self.first_log_index = compact_up_to + 1;
 
         tracing::info!(

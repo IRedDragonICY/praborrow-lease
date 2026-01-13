@@ -33,6 +33,7 @@ prometheus = { workspace = true, optional = true }
 config = "0.14"
 bytes = { version = "1.5", features = ["serde"] }
 petgraph = "0.6"
+dashmap = "6.1.0"
 
 [dev-dependencies]
 tokio = { workspace = true }

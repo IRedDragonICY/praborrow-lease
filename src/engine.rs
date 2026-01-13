@@ -1083,6 +1083,7 @@ where
     // COMMIT INDEX ADVANCEMENT
     // ========================================================================
 
+    #[tracing::instrument(skip(self), level = "debug")]
     async fn advance_commit_index(&mut self) -> Result<(), ConsensusError> {
         if self.role != RaftRole::Leader {
             return Ok(());
