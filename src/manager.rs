@@ -115,7 +115,7 @@ mod tests {
 
         // Heartbeat should return false (expired)
         assert!(!manager.heartbeat());
-        
+
         // Map should be empty
         assert!(manager.active_leases.is_empty());
     }

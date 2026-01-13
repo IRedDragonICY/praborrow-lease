@@ -307,10 +307,10 @@ pub trait RaftNetwork<T: Send + Sync + Clone>: Send + Sync {
 }
 
 /// Network errors
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum NetworkError {
     #[error("Connection failed: {0}")]
-    ConnectionFailed(String),
+    ConnectionFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("Timeout")]
     Timeout,
     #[error("Serialization error: {0}")]

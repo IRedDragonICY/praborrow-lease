@@ -58,7 +58,7 @@ message InstallSnapshotRequest {
     uint64 last_included_index = 3;
     uint64 last_included_term = 4;
     bytes data = 5;
-    uint32 checksum = 6;
+    bytes checksum = 6;
 }
 
 message InstallSnapshotResponse {

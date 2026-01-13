@@ -95,12 +95,24 @@ impl RaftConfig {
     /// 1. Environment variables (PRABORROW_*)
     /// 2. `raft.toml` file
     /// 3. Defaults
-    pub fn load() -> Result<Self, config::ConfigError> {
+    ///    Loads configuration from `raft.toml` and environment variables.
+    ///
+    /// # Priority (Highest first):
+    /// 1. Environment variables (PRABORROW_*)
+    /// 2. `raft.toml` file
+    /// 3. Defaults
+    pub fn load() -> Self {
         let builder = config::Config::builder()
             .add_source(config::File::with_name("raft").required(false))
             .add_source(config::Environment::with_prefix("PRABORROW"));
 
-        builder.build()?.try_deserialize()
+        match builder.build().and_then(|c| c.try_deserialize()) {
+            Ok(config) => config,
+            Err(e) => {
+                tracing::warn!("Failed to load configuration: {}. Using defaults.", e);
+                Self::default()
+            }
+        }
     }
 
     /// Returns a randomized election timeout

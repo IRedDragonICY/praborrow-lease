@@ -167,13 +167,12 @@ impl CircuitBreaker {
         match inner.state {
             CircuitState::Closed => true,
             CircuitState::Open => {
-                // Check if reset timeout has passed
-                if let Some(last_failure) = inner.last_failure_time {
-                    if last_failure.elapsed() > self.config.reset_timeout {
-                        inner.state = CircuitState::HalfOpen;
-                        inner.success_count = 0;
-                        return true;
-                    }
+                if let Some(last_failure) = inner.last_failure_time
+                    && last_failure.elapsed() > self.config.reset_timeout
+                {
+                    inner.state = CircuitState::HalfOpen;
+                    inner.success_count = 0;
+                    return true;
                 }
                 false
             }
@@ -210,7 +209,10 @@ impl CircuitBreaker {
                 inner.failure_count += 1;
                 if inner.failure_count >= self.config.failure_threshold {
                     inner.state = CircuitState::Open;
-                    tracing::warn!("Circuit breaker opened after {} failures", inner.failure_count);
+                    tracing::warn!(
+                        "Circuit breaker opened after {} failures",
+                        inner.failure_count
+                    );
                 }
             }
             CircuitState::HalfOpen => {
@@ -236,35 +238,13 @@ struct PeerConnection {
 pub struct ConnectionPool {
     connections: RwLock<HashMap<NodeId, PeerConnection>>,
     config: GrpcConfig,
-    tls_config: Option<ClientTlsConfig>,
 }
 
 impl ConnectionPool {
     pub fn new(config: GrpcConfig) -> Self {
-        let tls_config = if let Some(tls) = &config.tls {
-            let pem = fs::read_to_string(&tls.ca_cert).expect("Failed to read CA cert");
-            let ca = Certificate::from_pem(pem);
-
-            let mut tls_config = ClientTlsConfig::new()
-                .ca_certificate(ca)
-                .domain_name(tls.domain_name.as_deref().unwrap_or("localhost"));
-
-            if let (Some(cert_path), Some(key_path)) = (&tls.client_cert, &tls.client_key) {
-                let cert = fs::read_to_string(cert_path).expect("Failed to read client cert");
-                let key = fs::read_to_string(key_path).expect("Failed to read client key");
-                let identity = Identity::from_pem(cert, key);
-                tls_config = tls_config.identity(identity);
-            }
-
-            Some(tls_config)
-        } else {
-            None
-        };
-
         Self {
             connections: RwLock::new(HashMap::new()),
             config,
-            tls_config,
         }
     }
 
@@ -279,9 +259,9 @@ impl ConnectionPool {
             let connections = self.connections.read().await;
             if let Some(conn) = connections.get(&peer_id) {
                 if !conn.circuit_breaker.allow_request() {
-                    return Err(NetworkError::ConnectionFailed(
-                        "Circuit breaker open".into(),
-                    ));
+                    return Err(NetworkError::ConnectionFailed(Box::new(
+                        std::io::Error::other("Circuit breaker open"),
+                    )));
                 }
                 return Ok(conn.client.clone());
             }
@@ -289,14 +269,43 @@ impl ConnectionPool {
 
         // Create new connection
         let endpoint = Endpoint::from_shared(format!("http://{}", address))
-            .map_err(|e| NetworkError::ConnectionFailed(e.to_string()))?
+            .map_err(|e| NetworkError::ConnectionFailed(Box::new(e)))?
             .connect_timeout(self.config.connect_timeout)
             .timeout(self.config.request_timeout);
 
-        let endpoint = if let Some(tls_config) = &self.tls_config {
-            endpoint.tls_config(tls_config.clone()).map_err(|e| {
-                NetworkError::ConnectionFailed(format!("Failed to configure TLS: {}", e))
-            })?
+        let endpoint = if let Some(tls) = &self.config.tls {
+            let ca_pem = tokio::fs::read(&tls.ca_cert).await.map_err(|e| {
+                NetworkError::ConnectionFailed(Box::new(std::io::Error::other(format!(
+                    "Failed to read CA cert: {}",
+                    e
+                ))))
+            })?;
+            let ca = Certificate::from_pem(ca_pem);
+
+            let mut tls_config = ClientTlsConfig::new()
+                .ca_certificate(ca)
+                .domain_name(tls.domain_name.as_deref().unwrap_or("localhost"));
+
+            if let (Some(cert_path), Some(key_path)) = (&tls.client_cert, &tls.client_key) {
+                let cert = tokio::fs::read(cert_path).await.map_err(|e| {
+                    NetworkError::ConnectionFailed(Box::new(std::io::Error::other(format!(
+                        "Failed to read client cert: {}",
+                        e
+                    ))))
+                })?;
+                let key = tokio::fs::read(key_path).await.map_err(|e| {
+                    NetworkError::ConnectionFailed(Box::new(std::io::Error::other(format!(
+                        "Failed to read client key: {}",
+                        e
+                    ))))
+                })?;
+                let identity = Identity::from_pem(cert, key);
+                tls_config = tls_config.identity(identity);
+            }
+
+            endpoint
+                .tls_config(tls_config)
+                .map_err(|e| NetworkError::ConnectionFailed(Box::new(e)))?
         } else {
             endpoint
         };
@@ -304,7 +313,7 @@ impl ConnectionPool {
         let channel = endpoint
             .connect()
             .await
-            .map_err(|e| NetworkError::ConnectionFailed(e.to_string()))?;
+            .map_err(|e| NetworkError::ConnectionFailed(Box::new(e)))?;
 
         let client = RaftClient::new(channel);
 

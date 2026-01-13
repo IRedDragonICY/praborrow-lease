@@ -192,6 +192,8 @@ impl<T> From<VersionedLogEntry<T>> for LogEntry<T> {
     }
 }
 
+use sha2::{Digest, Sha256};
+
 /// Snapshot of the state machine for log compaction.
 ///
 /// Contains the state at a specific log index, allowing truncation of
@@ -204,8 +206,8 @@ pub struct Snapshot<T> {
     pub last_included_term: Term,
     /// The serialized state machine data
     pub data: T,
-    /// CRC32 checksum for integrity verification
-    pub checksum: u32,
+    /// SHA256 checksum for integrity verification
+    pub checksum: Vec<u8>,
 }
 
 impl<T: Serialize> Snapshot<T> {
@@ -221,7 +223,8 @@ impl<T: Serialize> Snapshot<T> {
         let serialized = bincode::serialize(&data).map_err(|e| {
             ConsensusError::SnapshotError(format!("Failed to serialize data: {}", e))
         })?;
-        let checksum = crc32fast::hash(&serialized);
+        let hash = Sha256::digest(&serialized);
+        let checksum = hash.to_vec();
 
         Ok(Self {
             last_included_index,
@@ -239,11 +242,12 @@ impl<T: Serialize> Snapshot<T> {
         let serialized = bincode::serialize(&self.data).map_err(|e| {
             ConsensusError::SnapshotError(format!("Failed to serialize for verification: {}", e))
         })?;
-        let computed = crc32fast::hash(&serialized);
+        let hash = Sha256::digest(&serialized);
+        let computed = hash.to_vec();
 
         if computed != self.checksum {
             return Err(ConsensusError::IntegrityError(format!(
-                "Snapshot checksum mismatch: expected {}, got {}",
+                "Snapshot checksum mismatch: expected {:?}, got {:?}",
                 self.checksum, computed
             )));
         }
@@ -579,7 +583,7 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
 // PRODUCTION FILE-BASED STORAGE (REDB)
 // ============================================================================
 
-use redb::{Database, TableDefinition, ReadableDatabase, ReadableTable, ReadableTableMetadata};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::sync::Arc;
 
 const LOG_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("log");
@@ -622,12 +626,19 @@ impl<T> FileStorage<T> {
             .map_err(|e| ConsensusError::StorageError(format!("Failed to open redb: {}", e)))?;
 
         // Initialize tables if needed
-        let txn = db.begin_write().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let txn = db
+            .begin_write()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         {
-            let _ = txn.open_table(LOG_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-            let _ = txn.open_table(META_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            let _ = txn
+                .open_table(LOG_TABLE)
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            let _ = txn
+                .open_table(META_TABLE)
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         }
-        txn.commit().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        txn.commit()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
 
         let storage = Self {
             path,
@@ -637,9 +648,17 @@ impl<T> FileStorage<T> {
         };
 
         // Log recovery info
-        let read_txn = storage.db.begin_read().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        let log_table = read_txn.open_table(LOG_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        tracing::info!(log_entries = log_table.len().unwrap_or(0), "Storage opened successfully");
+        let read_txn = storage
+            .db
+            .begin_read()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let log_table = read_txn
+            .open_table(LOG_TABLE)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        tracing::info!(
+            log_entries = log_table.len().unwrap_or(0),
+            "Storage opened successfully"
+        );
 
         Ok(storage)
     }
@@ -660,12 +679,16 @@ impl<T> FileStorage<T> {
     pub fn stats(&self) -> StorageStats {
         // Estimate size from file
         let db_size = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
-        
+
         let log_entries = if let Ok(txn) = self.db.begin_read() {
-             if let Ok(table) = txn.open_table(LOG_TABLE) {
-                 table.len().unwrap_or(0)
-             } else { 0 }
-        } else { 0 };
+            if let Ok(table) = txn.open_table(LOG_TABLE) {
+                table.len().unwrap_or(0)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
 
         StorageStats {
             path: self.path.clone(),
@@ -676,18 +699,24 @@ impl<T> FileStorage<T> {
 
     /// Gets the first log index (after compaction).
     fn get_first_log_index(&self) -> Result<LogIndex, ConsensusError> {
-        let txn = self.db.begin_read().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        let table = txn.open_table(META_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        
-        if let Some(val) = table.get(KEY_FIRST_LOG_INDEX).map_err(|e| ConsensusError::StorageError(e.to_string()))? {
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let table = txn
+            .open_table(META_TABLE)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+
+        if let Some(val) = table
+            .get(KEY_FIRST_LOG_INDEX)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?
+        {
             let val = val.value();
             bincode::deserialize(val).map_err(|e| ConsensusError::StorageError(e.to_string()))
         } else {
             Ok(0)
         }
     }
-
-
 }
 
 /// Storage statistics for monitoring.
@@ -708,20 +737,28 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         }
 
         let start = std::time::Instant::now();
-        let txn = self.db.begin_write().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+
         {
-            let mut table = txn.open_table(LOG_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-            
+            let mut table = txn
+                .open_table(LOG_TABLE)
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+
             for entry in entries {
                 let versioned: VersionedLogEntry<T> = entry.clone().into();
                 let value = bincode::serialize(&versioned)
                     .map_err(|e| ConsensusError::StorageError(format!("Serialize error: {}", e)))?;
-                table.insert(entry.index, value.as_slice()).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+                table
+                    .insert(entry.index, value.as_slice())
+                    .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
             }
         }
-        
-        txn.commit().map_err(|e| ConsensusError::StorageError(format!("Commit failed: {}", e)))?;
+
+        txn.commit()
+            .map_err(|e| ConsensusError::StorageError(format!("Commit failed: {}", e)))?;
 
         if let Some(metrics) = &self.metrics {
             metrics.observe_disk_write(start.elapsed());
@@ -743,10 +780,18 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
             return Ok(None); // Compacted
         }
 
-        let txn = self.db.begin_read().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        let table = txn.open_table(LOG_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let table = txn
+            .open_table(LOG_TABLE)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
 
-        if let Some(val) = table.get(index).map_err(|e| ConsensusError::StorageError(e.to_string()))? {
+        if let Some(val) = table
+            .get(index)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?
+        {
             let val = val.value();
             let versioned: VersionedLogEntry<T> = bincode::deserialize(val)
                 .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
@@ -770,11 +815,19 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         let first_index = self.get_first_log_index()?;
         let actual_start = start.max(first_index);
 
-        let txn = self.db.begin_read().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        let table = txn.open_table(LOG_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let table = txn
+            .open_table(LOG_TABLE)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
 
         let mut entries = Vec::new();
-        for item in table.range(actual_start..end).map_err(|e| ConsensusError::StorageError(e.to_string()))? {
+        for item in table
+            .range(actual_start..end)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?
+        {
             let (_, val) = item.map_err(|e| ConsensusError::StorageError(e.to_string()))?;
             let val = val.value();
             let versioned: VersionedLogEntry<T> = bincode::deserialize(val)
@@ -786,10 +839,18 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
     }
 
     async fn get_term(&self) -> Result<Term, ConsensusError> {
-        let txn = self.db.begin_read().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        let table = txn.open_table(META_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        
-        if let Some(val) = table.get(KEY_TERM).map_err(|e| ConsensusError::StorageError(e.to_string()))? {
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let table = txn
+            .open_table(META_TABLE)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+
+        if let Some(val) = table
+            .get(KEY_TERM)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?
+        {
             let val = val.value();
             bincode::deserialize(val).map_err(|e| ConsensusError::StorageError(e.to_string()))
         } else {
@@ -798,24 +859,41 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
     }
 
     async fn set_term(&mut self, term: Term) -> Result<(), ConsensusError> {
-        let val = bincode::serialize(&term).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        
-        let txn = self.db.begin_write().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let val =
+            bincode::serialize(&term).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         {
-            let mut table = txn.open_table(META_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-            table.insert(KEY_TERM, val.as_slice()).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            let mut table = txn
+                .open_table(META_TABLE)
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            table
+                .insert(KEY_TERM, val.as_slice())
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         }
-        txn.commit().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        txn.commit()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
 
         tracing::debug!(term = term, "Persisted term");
         Ok(())
     }
 
     async fn get_vote(&self) -> Result<Option<NodeId>, ConsensusError> {
-        let txn = self.db.begin_read().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        let table = txn.open_table(META_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        
-        if let Some(val) = table.get(KEY_VOTE).map_err(|e| ConsensusError::StorageError(e.to_string()))? {
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let table = txn
+            .open_table(META_TABLE)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+
+        if let Some(val) = table
+            .get(KEY_VOTE)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?
+        {
             let val = val.value();
             bincode::deserialize(val).map_err(|e| ConsensusError::StorageError(e.to_string()))
         } else {
@@ -824,14 +902,23 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
     }
 
     async fn set_vote(&mut self, vote: Option<NodeId>) -> Result<(), ConsensusError> {
-        let val = bincode::serialize(&vote).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        
-        let txn = self.db.begin_write().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let val =
+            bincode::serialize(&vote).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         {
-            let mut table = txn.open_table(META_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-            table.insert(KEY_VOTE, val.as_slice()).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            let mut table = txn
+                .open_table(META_TABLE)
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            table
+                .insert(KEY_VOTE, val.as_slice())
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         }
-        txn.commit().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        txn.commit()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
 
         tracing::debug!(vote = ?vote, "Persisted vote");
         Ok(())
@@ -842,16 +929,28 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         term: Term,
         vote: Option<NodeId>,
     ) -> Result<(), ConsensusError> {
-        let term_bytes = bincode::serialize(&term).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        let vote_bytes = bincode::serialize(&vote).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let term_bytes =
+            bincode::serialize(&term).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let vote_bytes =
+            bincode::serialize(&vote).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
 
-        let txn = self.db.begin_write().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         {
-            let mut table = txn.open_table(META_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-            table.insert(KEY_TERM, term_bytes.as_slice()).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-            table.insert(KEY_VOTE, vote_bytes.as_slice()).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            let mut table = txn
+                .open_table(META_TABLE)
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            table
+                .insert(KEY_TERM, term_bytes.as_slice())
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            table
+                .insert(KEY_VOTE, vote_bytes.as_slice())
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         }
-        txn.commit().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        txn.commit()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
 
         tracing::debug!(term = term, vote = ?vote, "Persisted term and vote atomically");
         Ok(())
@@ -861,27 +960,43 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         &self,
     ) -> Result<Box<dyn Iterator<Item = Result<LogEntry<T>, ConsensusError>> + Send>, ConsensusError>
     {
-        let txn = self.db.begin_read().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        let table = txn.open_table(LOG_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let table = txn
+            .open_table(LOG_TABLE)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
 
         let mut entries = Vec::new();
         // iter() on table returns all entries
-        for item in table.iter().map_err(|e| ConsensusError::StorageError(e.to_string()))? {
+        for item in table
+            .iter()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?
+        {
             let (_, val) = item.map_err(|e| ConsensusError::StorageError(e.to_string()))?;
             let val = val.value();
             let versioned: VersionedLogEntry<T> = bincode::deserialize(val)
                 .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
             entries.push(Ok(versioned.into()));
         }
-        
+
         Ok(Box::new(entries.into_iter()))
     }
 
     async fn get_last_log_info(&self) -> Result<LogInfo, ConsensusError> {
-        let txn = self.db.begin_read().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        let table = txn.open_table(LOG_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let table = txn
+            .open_table(LOG_TABLE)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
 
-        if let Some((_, val)) = table.last().map_err(|e| ConsensusError::StorageError(e.to_string()))? {
+        if let Some((_, val)) = table
+            .last()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?
+        {
             let val = val.value();
             let versioned: VersionedLogEntry<T> = bincode::deserialize(val)
                 .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
@@ -907,27 +1022,37 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         // Redb doesn't support range delete directly in one call, need to iterate keys to delete?
         // Wait, `redb` doesn't support batch remove by range efficiently?
         // We have to iterate and delete.
-        
-        let txn = self.db.begin_write().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         let count_removed = {
-            let mut table = txn.open_table(LOG_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            let mut table = txn
+                .open_table(LOG_TABLE)
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
             // We need to collect keys first to avoid concurrent modification issues if that's a thing,
             // but redb might allow it. Safest is collect keys.
             // Actually `table.range(from_index..)` returns an iterator.
             // We can't iterate and delete on same table access usually.
             // Let's collect keys.
-             let keys: Vec<u64> = table.range(from_index..).map_err(|e| ConsensusError::StorageError(e.to_string()))?
+            let keys: Vec<u64> = table
+                .range(from_index..)
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?
                 .map(|r| r.unwrap().0.value())
                 .collect();
-            
+
             let count = keys.len();
             for key in keys {
-                table.remove(key).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+                table
+                    .remove(key)
+                    .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
             }
             count
         };
-        
-        txn.commit().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+
+        txn.commit()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
 
         if count_removed > 0 {
             tracing::debug!(
@@ -941,10 +1066,18 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
     }
 
     async fn get_commit_index(&self) -> Result<LogIndex, ConsensusError> {
-        let txn = self.db.begin_read().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        let table = txn.open_table(META_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        
-        if let Some(val) = table.get(KEY_COMMIT_INDEX).map_err(|e| ConsensusError::StorageError(e.to_string()))? {
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let table = txn
+            .open_table(META_TABLE)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+
+        if let Some(val) = table
+            .get(KEY_COMMIT_INDEX)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?
+        {
             let val = val.value();
             bincode::deserialize(val).map_err(|e| ConsensusError::StorageError(e.to_string()))
         } else {
@@ -953,22 +1086,39 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
     }
 
     async fn set_commit_index(&mut self, index: LogIndex) -> Result<(), ConsensusError> {
-        let val = bincode::serialize(&index).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        
-        let txn = self.db.begin_write().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let val =
+            bincode::serialize(&index).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         {
-            let mut table = txn.open_table(META_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-            table.insert(KEY_COMMIT_INDEX, val.as_slice()).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            let mut table = txn
+                .open_table(META_TABLE)
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            table
+                .insert(KEY_COMMIT_INDEX, val.as_slice())
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         }
-        txn.commit().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        txn.commit()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         Ok(())
     }
 
     async fn get_peers(&self) -> Result<Vec<String>, ConsensusError> {
-        let txn = self.db.begin_read().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        let table = txn.open_table(META_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        
-        if let Some(val) = table.get(KEY_PEERS).map_err(|e| ConsensusError::StorageError(e.to_string()))? {
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let table = txn
+            .open_table(META_TABLE)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+
+        if let Some(val) = table
+            .get(KEY_PEERS)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?
+        {
             let val = val.value();
             bincode::deserialize(val).map_err(|e| ConsensusError::StorageError(e.to_string()))
         } else {
@@ -977,22 +1127,39 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
     }
 
     async fn set_peers(&mut self, peers: &[String]) -> Result<(), ConsensusError> {
-        let val = bincode::serialize(peers).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        
-        let txn = self.db.begin_write().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let val =
+            bincode::serialize(peers).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         {
-            let mut table = txn.open_table(META_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-            table.insert(KEY_PEERS, val.as_slice()).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            let mut table = txn
+                .open_table(META_TABLE)
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            table
+                .insert(KEY_PEERS, val.as_slice())
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         }
-        txn.commit().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        txn.commit()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         Ok(())
     }
 
     async fn get_snapshot(&self) -> Result<Option<Snapshot<T>>, ConsensusError> {
-        let txn = self.db.begin_read().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        let table = txn.open_table(META_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-        
-        if let Some(val) = table.get(KEY_SNAPSHOT).map_err(|e| ConsensusError::StorageError(e.to_string()))? {
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let table = txn
+            .open_table(META_TABLE)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+
+        if let Some(val) = table
+            .get(KEY_SNAPSHOT)
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?
+        {
             let val = val.value();
             let snapshot: Snapshot<T> = bincode::deserialize(val)
                 .map_err(|e| ConsensusError::SnapshotError(format!("Deserialize error: {}", e)))?;
@@ -1016,34 +1183,51 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         let snapshot_bytes = bincode::serialize(&snapshot)
             .map_err(|e| ConsensusError::SnapshotError(format!("Serialize error: {}", e)))?;
 
-        let txn = self.db.begin_write().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         {
-             // Store snapshot
-            let mut meta_table = txn.open_table(META_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-            meta_table.insert(KEY_SNAPSHOT, snapshot_bytes.as_slice()).map_err(|e| ConsensusError::SnapshotError(e.to_string()))?;
-            
-             // Compact log
-             // Remove entries <= last_included_index
-             let mut log_table = txn.open_table(LOG_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-             // Same issue: iterate and delete.
-             // We need entries <= last_included_index.
-             // redb range is inclusive/exclusive? RangeBound. 
-             // We can range(..=last_included_index)
-             let keys: Vec<u64> = log_table.range(..=last_included_index).map_err(|e| ConsensusError::StorageError(e.to_string()))?
+            // Store snapshot
+            let mut meta_table = txn
+                .open_table(META_TABLE)
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            meta_table
+                .insert(KEY_SNAPSHOT, snapshot_bytes.as_slice())
+                .map_err(|e| ConsensusError::SnapshotError(e.to_string()))?;
+
+            // Compact log
+            // Remove entries <= last_included_index
+            let mut log_table = txn
+                .open_table(LOG_TABLE)
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            // Same issue: iterate and delete.
+            // We need entries <= last_included_index.
+            // redb range is inclusive/exclusive? RangeBound.
+            // We can range(..=last_included_index)
+            let keys: Vec<u64> = log_table
+                .range(..=last_included_index)
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?
                 .map(|r| r.unwrap().0.value())
                 .collect();
-             
-             for key in keys {
-                 log_table.remove(key).map_err(|e| ConsensusError::CompactionError(e.to_string()))?;
-             }
-             
-             // Update first log index
-             // Store first_log_index = last_included_index + 1
-             let first_index_val = bincode::serialize(&(last_included_index + 1)).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-             meta_table.insert(KEY_FIRST_LOG_INDEX, first_index_val.as_slice()).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+
+            for key in keys {
+                log_table
+                    .remove(key)
+                    .map_err(|e| ConsensusError::CompactionError(e.to_string()))?;
+            }
+
+            // Update first log index
+            // Store first_log_index = last_included_index + 1
+            let first_index_val = bincode::serialize(&(last_included_index + 1))
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            meta_table
+                .insert(KEY_FIRST_LOG_INDEX, first_index_val.as_slice())
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         }
-        
-        txn.commit().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+
+        txn.commit()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
 
         tracing::info!(
             last_included_index = last_included_index,
@@ -1063,29 +1247,46 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         let snapshot_bytes = bincode::serialize(&snapshot)
             .map_err(|e| ConsensusError::SnapshotError(format!("Serialize error: {}", e)))?;
 
-        let txn = self.db.begin_write().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         {
-            let mut meta_table = txn.open_table(META_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-            meta_table.insert(KEY_SNAPSHOT, snapshot_bytes.as_slice()).map_err(|e| ConsensusError::SnapshotError(e.to_string()))?;
-            
-            // Clear entire log? 
+            let mut meta_table = txn
+                .open_table(META_TABLE)
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            meta_table
+                .insert(KEY_SNAPSHOT, snapshot_bytes.as_slice())
+                .map_err(|e| ConsensusError::SnapshotError(e.to_string()))?;
+
+            // Clear entire log?
             // "Clear the entire log" in old impl.
             // redb doesn't have clear(). Iter keys and delete.
-            let mut log_table = txn.open_table(LOG_TABLE).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-            
+            let mut log_table = txn
+                .open_table(LOG_TABLE)
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+
             // Iterate all
-            let keys: Vec<u64> = log_table.iter().map_err(|e| ConsensusError::StorageError(e.to_string()))?
-                 .map(|r| r.unwrap().0.value())
-                 .collect();
+            let keys: Vec<u64> = log_table
+                .iter()
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?
+                .map(|r| r.unwrap().0.value())
+                .collect();
             for key in keys {
-                log_table.remove(key).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+                log_table
+                    .remove(key)
+                    .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
             }
-            
+
             // Update first log index
-            let first_index_val = bincode::serialize(&(last_included_index + 1)).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
-            meta_table.insert(KEY_FIRST_LOG_INDEX, first_index_val.as_slice()).map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            let first_index_val = bincode::serialize(&(last_included_index + 1))
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+            meta_table
+                .insert(KEY_FIRST_LOG_INDEX, first_index_val.as_slice())
+                .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
         }
-        txn.commit().map_err(|e| ConsensusError::StorageError(e.to_string()))?;
+        txn.commit()
+            .map_err(|e| ConsensusError::StorageError(e.to_string()))?;
 
         tracing::info!(
             last_included_index = last_included_index,
@@ -1759,7 +1960,7 @@ mod tests {
 
         // Tamper with checksum
         let mut bad_snapshot = snapshot.clone();
-        bad_snapshot.checksum = 12345;
+        bad_snapshot.checksum = vec![1, 2, 3, 4];
         assert!(bad_snapshot.verify().is_err());
     }
 
