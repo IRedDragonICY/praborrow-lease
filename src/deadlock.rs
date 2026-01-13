@@ -43,6 +43,7 @@ impl WaitForGraph {
     }
 
     /// Removes a dependency when a resource is acquired or request cancelled.
+    #[allow(clippy::collapsible_if)]
     pub fn remove_wait(&mut self, who: NodeId, what: NodeId) {
         if let (Some(&who_idx), Some(&what_idx)) =
             (self.node_map.get(&who), self.node_map.get(&what))
@@ -63,6 +64,12 @@ impl WaitForGraph {
 /// Service that monitors lease contentions.
 pub struct DeadlockDetector {
     graph: WaitForGraph,
+}
+
+impl Default for DeadlockDetector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DeadlockDetector {

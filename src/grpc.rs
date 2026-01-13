@@ -2,7 +2,7 @@
 //!
 //! Production-ready gRPC transport with TLS, connection pooling, and circuit breaker.
 
-#![cfg(feature = "grpc")]
+// #![cfg(feature = "grpc")] // Redundant with mod declaration
 
 use crate::network::{NetworkError, PeerInfo, RaftMessage, RaftNetwork};
 use crate::raft::{LogEntry, LogIndex, NodeId, Snapshot, Term};
@@ -20,6 +20,7 @@ pub mod proto {
 
 use proto::raft_client::RaftClient;
 use proto::raft_server::{Raft, RaftServer};
+use proto::control_plane_server::{ControlPlane, ControlPlaneServer}; // Import ControlPlane
 use std::fs;
 use tonic::{
     Request, Response, Status,
@@ -349,6 +350,7 @@ impl ConnectionPool {
 
 /// gRPC-based network transport for Raft.
 pub struct GrpcTransport<T> {
+    #[allow(dead_code)] // TODO: Use node_id
     node_id: NodeId,
     peers: Arc<RwLock<HashMap<NodeId, PeerInfo>>>,
     pool: Arc<ConnectionPool>,
@@ -451,7 +453,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
         let peers = self.peers.read().await;
         let peer = peers
             .get(&peer_id)
-            .ok_or_else(|| NetworkError::PeerNotFound(peer_id))?;
+            .ok_or(NetworkError::PeerNotFound(peer_id))?;
         let address = peer.address.clone();
         drop(peers);
 
@@ -467,7 +469,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             .send_with_retry(peer_id, || {
                 let pool = pool.clone();
                 let address = address.clone();
-                let request = request.clone();
+
 
                 Box::pin(async move {
                     let mut client = pool.get_connection(peer_id, &address).await?;
@@ -509,7 +511,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
         let peers = self.peers.read().await;
         let peer = peers
             .get(&peer_id)
-            .ok_or_else(|| NetworkError::PeerNotFound(peer_id))?;
+            .ok_or(NetworkError::PeerNotFound(peer_id))?;
         let address = peer.address.clone();
         drop(peers);
 
@@ -575,7 +577,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
         let peers = self.peers.read().await;
         let peer = peers
             .get(&peer_id)
-            .ok_or_else(|| NetworkError::PeerNotFound(peer_id))?;
+            .ok_or(NetworkError::PeerNotFound(peer_id))?;
         let address = peer.address.clone();
         drop(peers);
 
@@ -782,6 +784,57 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
     }
 }
 
+// ============================================================================
+// CONTROL PLANE SERVER
+// ============================================================================
+
+pub struct RaftControlPlane {
+    node_id: NodeId,
+}
+
+impl RaftControlPlane {
+    pub fn new(node_id: NodeId) -> Self {
+        Self { node_id }
+    }
+}
+
+#[tonic::async_trait]
+impl ControlPlane for RaftControlPlane {
+    async fn get_node_status(
+        &self,
+        _request: Request<proto::Empty>,
+    ) -> Result<Response<proto::NodeStatus>, Status> {
+        // Mock data for now, eventually this should read from shared state
+        Ok(Response::new(proto::NodeStatus {
+            state: "Leader".to_string(), // TODO: Real state
+            current_term: 10,
+            commit_index: 42,
+            last_applied: 42,
+            connected_peers: 2,
+            id: self.node_id as u64,
+        }))
+    }
+
+    async fn get_recent_logs(
+        &self,
+        request: Request<proto::LogRequest>,
+    ) -> Result<Response<proto::LogResponse>, Status> {
+        let req = request.into_inner();
+        let limit = req.limit.min(100) as usize;
+
+        // Mock logs
+        let logs = vec![
+            "INFO: Raft started".to_string(),
+            "INFO: Became election candidate".to_string(),
+            "INFO: Elected leader term 10".to_string(),
+        ];
+        
+        Ok(Response::new(proto::LogResponse {
+            logs: logs.into_iter().take(limit).collect(),
+        }))
+    }
+}
+
 /// Starts the gRPC server.
 pub async fn start_grpc_server<
     T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
@@ -793,6 +846,7 @@ pub async fn start_grpc_server<
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr = bind_addr.parse()?;
     let server = RaftGrpcServer::new(node_id, inbox_sender);
+    let control_plane = RaftControlPlane::new(node_id); // Create Control Plane
 
     tracing::info!(addr = bind_addr, "Starting gRPC server");
 
@@ -816,6 +870,7 @@ pub async fn start_grpc_server<
 
     builder
         .add_service(RaftServer::new(server))
+        .add_service(ControlPlaneServer::new(control_plane))
         .serve(addr)
         .await?;
 

@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn test_role_metric_conversion() {
-        use crate::raft::RaftRole;
+
 
         assert_eq!(RaftRoleMetric::from_role(0), RaftRoleMetric::Follower);
         assert_eq!(RaftRoleMetric::from_role(1), RaftRoleMetric::Candidate);

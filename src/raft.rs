@@ -1753,6 +1753,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn test_raft_node_dynamic_membership() {
         use crate::network::Packet;
         use async_trait::async_trait;

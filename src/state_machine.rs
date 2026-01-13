@@ -299,11 +299,10 @@ mod tests {
     #[test]
     fn test_noop_state_machine() {
         let mut sm = NoOpStateMachine;
-        let output = sm.apply(vec![1, 2, 3]);
-        assert_eq!(output, ());
+        sm.apply(vec![1, 2, 3]);
 
-        let snapshot = sm.snapshot();
-        sm.restore(snapshot);
+        sm.snapshot();
+        sm.restore(());
     }
 
     #[test]

@@ -35,6 +35,7 @@ struct TestNetwork<T: Clone + Send + Sync + 'static> {
 impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static>
     TestCluster<T>
 {
+    #![allow(dead_code)]
     /// Creates a new test cluster with the specified number of nodes.
     pub fn new(node_count: usize) -> Self {
         let mut nodes = HashMap::new();
@@ -71,6 +72,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
 }
 
 /// Creates a 3-node test cluster with in-memory storage.
+#[allow(clippy::type_complexity)]
 pub fn create_test_cluster() -> (
     Vec<(
         NodeId,
@@ -79,6 +81,7 @@ pub fn create_test_cluster() -> (
         mpsc::Receiver<RaftMessage<String>>,
     )>,
 ) {
+    #[allow(clippy::type_complexity)]
     let mut nodes = Vec::new();
 
     for i in 1..=3 {
@@ -246,7 +249,7 @@ mod tests {
         storage.append_entries(&entries).await.unwrap();
 
         // Simulate majority replication (match_index)
-        let match_indices = vec![2, 2]; // 2 followers at index 2
+        let match_indices = [2, 2]; // 2 followers at index 2
         let quorum = 2;
 
         // Find highest N where majority has matchIndex >= N
