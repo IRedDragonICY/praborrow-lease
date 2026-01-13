@@ -116,6 +116,12 @@ impl RaftConfig {
         if self.election_timeout_min >= self.election_timeout_max {
             return Err("election_timeout_min must be less than election_timeout_max".to_string());
         }
+        // Strict safety check to prevent infinite election loops
+        if self.heartbeat_interval.mul_f64(2.0) > self.election_timeout_min {
+            return Err(
+                "heartbeat_interval must be at most half of election_timeout_min".to_string(),
+            );
+        }
         if self.heartbeat_interval >= self.election_timeout_min {
             return Err("heartbeat_interval must be less than election_timeout_min".to_string());
         }
@@ -1095,6 +1101,8 @@ where
         // 2. A majority of matchIndex[i] >= N
         // 3. log[N].term == currentTerm
 
+        let mut joint_entry_to_finalize = None;
+
         for (i, n) in ((self.commit_index + 1)..=log_info.last_index).enumerate() {
             // Anti-blocking yield
             if i % 100 == 0 {
@@ -1127,16 +1135,55 @@ where
 
                 // If we just committed a configuration change, we might need to transition
                 if let Some(LogEntry {
-                    command: LogCommand::Config(ClusterConfig::Joint { .. }),
+                    command: LogCommand::Config(config @ ClusterConfig::Joint { .. }),
                     ..
                 }) = entry
                 {
                     // Committing EnterJoint -> We should soon transition to LeaveJoint
-                    // In a full implementation, the leader would propose LeaveJoint here.
-                    // For now, we'll handle the logic in the main loop or dedicated method.
+                    joint_entry_to_finalize = Some(config.clone());
                 }
             }
         }
+
+        if let Some(config) = joint_entry_to_finalize {
+            self.finalize_conf_change(config).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Internal method to finalize a Joint Consensus configuration.
+    ///
+    /// Transitions from `Joint { old, new }` to `Single(new)`.
+    async fn finalize_conf_change(
+        &mut self,
+        joint_config: ClusterConfig,
+    ) -> Result<(), ConsensusError> {
+        let new_nodes = match joint_config {
+            ClusterConfig::Joint { old: _, new } => new,
+            _ => {
+                return Err(ConsensusError::ConfigChangeError(
+                    "Not in Joint state".into(),
+                ));
+            }
+        };
+
+        let final_config = ClusterConfig::Single(new_nodes);
+        let term = self.storage.get_term().await.unwrap_or(0);
+        let log_info = self.storage.get_last_log_info().await?;
+        let next_idx = log_info.last_index + 1;
+
+        let entry = LogEntry::config(next_idx, term, final_config.clone());
+        self.storage.append_entries(&[entry]).await?;
+
+        // Update active config immediately
+        self.cluster_config = final_config.clone();
+
+        tracing::info!(
+            node_id = self.id,
+            index = next_idx,
+            "Leader finalized configuration to Single state"
+        );
 
         Ok(())
     }

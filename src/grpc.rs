@@ -18,9 +18,9 @@ pub mod proto {
     tonic::include_proto!("raft");
 }
 
+use proto::control_plane_server::{ControlPlane, ControlPlaneServer}; // Import ControlPlane
 use proto::raft_client::RaftClient;
 use proto::raft_server::{Raft, RaftServer};
-use proto::control_plane_server::{ControlPlane, ControlPlaneServer}; // Import ControlPlane
 use std::fs;
 use tonic::{
     Request, Response, Status,
@@ -238,13 +238,35 @@ struct PeerConnection {
 pub struct ConnectionPool {
     connections: RwLock<HashMap<NodeId, PeerConnection>>,
     config: GrpcConfig,
+    tls_config: Option<ClientTlsConfig>,
 }
 
 impl ConnectionPool {
     pub fn new(config: GrpcConfig) -> Self {
+        let tls_config = if let Some(tls) = &config.tls {
+            let pem = fs::read_to_string(&tls.ca_cert).expect("Failed to read CA cert");
+            let ca = Certificate::from_pem(pem);
+
+            let mut tls_config = ClientTlsConfig::new()
+                .ca_certificate(ca)
+                .domain_name(tls.domain_name.as_deref().unwrap_or("localhost"));
+
+            if let (Some(cert_path), Some(key_path)) = (&tls.client_cert, &tls.client_key) {
+                let cert = fs::read_to_string(cert_path).expect("Failed to read client cert");
+                let key = fs::read_to_string(key_path).expect("Failed to read client key");
+                let identity = Identity::from_pem(cert, key);
+                tls_config = tls_config.identity(identity);
+            }
+
+            Some(tls_config)
+        } else {
+            None
+        };
+
         Self {
             connections: RwLock::new(HashMap::new()),
             config,
+            tls_config,
         }
     }
 
@@ -273,28 +295,8 @@ impl ConnectionPool {
             .connect_timeout(self.config.connect_timeout)
             .timeout(self.config.request_timeout);
 
-        let endpoint = if let Some(tls) = &self.config.tls {
-            let pem = fs::read_to_string(&tls.ca_cert).map_err(|e| {
-                NetworkError::ConnectionFailed(format!("Failed to read CA cert: {}", e))
-            })?;
-            let ca = Certificate::from_pem(pem);
-
-            let mut tls_config = ClientTlsConfig::new()
-                .ca_certificate(ca)
-                .domain_name(tls.domain_name.as_deref().unwrap_or("localhost"));
-
-            if let (Some(cert_path), Some(key_path)) = (&tls.client_cert, &tls.client_key) {
-                let cert = fs::read_to_string(cert_path).map_err(|e| {
-                    NetworkError::ConnectionFailed(format!("Failed to read client cert: {}", e))
-                })?;
-                let key = fs::read_to_string(key_path).map_err(|e| {
-                    NetworkError::ConnectionFailed(format!("Failed to read client key: {}", e))
-                })?;
-                let identity = Identity::from_pem(cert, key);
-                tls_config = tls_config.identity(identity);
-            }
-
-            endpoint.tls_config(tls_config).map_err(|e| {
+        let endpoint = if let Some(tls_config) = &self.tls_config {
+            endpoint.tls_config(tls_config.clone()).map_err(|e| {
                 NetworkError::ConnectionFailed(format!("Failed to configure TLS: {}", e))
             })?
         } else {
@@ -469,7 +471,6 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             .send_with_retry(peer_id, || {
                 let pool = pool.clone();
                 let address = address.clone();
-
 
                 Box::pin(async move {
                     let mut client = pool.get_connection(peer_id, &address).await?;
@@ -828,7 +829,7 @@ impl ControlPlane for RaftControlPlane {
             "INFO: Became election candidate".to_string(),
             "INFO: Elected leader term 10".to_string(),
         ];
-        
+
         Ok(Response::new(proto::LogResponse {
             logs: logs.into_iter().take(limit).collect(),
         }))

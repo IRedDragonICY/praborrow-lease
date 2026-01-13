@@ -1424,6 +1424,9 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         change: ConfChange,
         current_config: ClusterConfig,
     ) -> Result<ClusterConfig, ConsensusError> {
+        // TODO: Implement Automated Joint Consensus
+        // Current implementation is manual (Client drives Phase 1 -> Phase 2).
+        // Future goal: Leader automatically schedules Phase 2 after Phase 1 commit.
         // Only leader can propose changes
         if self.role != RaftRole::Leader {
             return Err(ConsensusError::NotLeader);

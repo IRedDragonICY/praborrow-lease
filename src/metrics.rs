@@ -79,10 +79,11 @@ impl RaftMetrics {
                     prometheus::DEFAULT_BUCKETS.to_vec()
                 )
                 .unwrap_or_else(|_| {
-                     prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
+                    prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
                         "raft_disk_write_duration_seconds",
                         "Disk write duration in seconds",
-                     )).unwrap()
+                    ))
+                    .unwrap()
                 }),
                 #[cfg(feature = "observability")]
                 rpc_latency: prometheus::register_histogram_vec!(
@@ -96,8 +97,9 @@ impl RaftMetrics {
                             "raft_rpc_latency_seconds",
                             "RPC latency in seconds",
                         ),
-                        &["method"]
-                    ).unwrap()
+                        &["method"],
+                    )
+                    .unwrap()
                 }),
             }),
         }
@@ -560,8 +562,6 @@ mod tests {
 
     #[test]
     fn test_role_metric_conversion() {
-
-
         assert_eq!(RaftRoleMetric::from_role(0), RaftRoleMetric::Follower);
         assert_eq!(RaftRoleMetric::from_role(1), RaftRoleMetric::Candidate);
         assert_eq!(RaftRoleMetric::from_role(2), RaftRoleMetric::Leader);
