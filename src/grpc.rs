@@ -9,7 +9,6 @@ use crate::raft::{LogEntry, LogIndex, NodeId, Snapshot, Term};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
@@ -126,55 +125,57 @@ pub enum CircuitState {
     HalfOpen = 2,
 }
 
+use std::sync::Mutex;
+use std::time::Instant;
+
+/// Circuit breaker state data.
+#[derive(Debug)]
+struct CircuitBreakerState {
+    state: CircuitState,
+    failure_count: u32,
+    success_count: u32,
+    last_failure_time: Option<Instant>,
+}
+
 /// Circuit breaker for fault tolerance.
 #[derive(Debug)]
 pub struct CircuitBreaker {
-    state: AtomicU8,
-    failure_count: AtomicU32,
-    success_count: AtomicU32,
-    last_failure_time: AtomicI64,
+    inner: Mutex<CircuitBreakerState>,
     config: CircuitBreakerConfig,
 }
 
 impl CircuitBreaker {
     pub fn new(config: CircuitBreakerConfig) -> Self {
         Self {
-            state: AtomicU8::new(CircuitState::Closed as u8),
-            failure_count: AtomicU32::new(0),
-            success_count: AtomicU32::new(0),
-            last_failure_time: AtomicI64::new(0),
+            inner: Mutex::new(CircuitBreakerState {
+                state: CircuitState::Closed,
+                failure_count: 0,
+                success_count: 0,
+                last_failure_time: None,
+            }),
             config,
         }
     }
 
     pub fn state(&self) -> CircuitState {
-        match self.state.load(Ordering::SeqCst) {
-            0 => CircuitState::Closed,
-            1 => CircuitState::Open,
-            _ => CircuitState::HalfOpen,
-        }
+        self.inner.lock().unwrap().state
     }
 
     /// Check if request is allowed.
     pub fn allow_request(&self) -> bool {
-        match self.state() {
+        let mut inner = self.inner.lock().unwrap();
+        match inner.state {
             CircuitState::Closed => true,
             CircuitState::Open => {
                 // Check if reset timeout has passed
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as i64;
-                let last_failure = self.last_failure_time.load(Ordering::SeqCst);
-
-                if now - last_failure > self.config.reset_timeout.as_millis() as i64 {
-                    self.state
-                        .store(CircuitState::HalfOpen as u8, Ordering::SeqCst);
-                    self.success_count.store(0, Ordering::SeqCst);
-                    true
-                } else {
-                    false
+                if let Some(last_failure) = inner.last_failure_time {
+                    if last_failure.elapsed() > self.config.reset_timeout {
+                        inner.state = CircuitState::HalfOpen;
+                        inner.success_count = 0;
+                        return true;
+                    }
                 }
+                false
             }
             CircuitState::HalfOpen => true,
         }
@@ -182,16 +183,16 @@ impl CircuitBreaker {
 
     /// Record a successful request.
     pub fn record_success(&self) {
-        match self.state() {
+        let mut inner = self.inner.lock().unwrap();
+        match inner.state {
             CircuitState::Closed => {
-                self.failure_count.store(0, Ordering::SeqCst);
+                inner.failure_count = 0;
             }
             CircuitState::HalfOpen => {
-                let count = self.success_count.fetch_add(1, Ordering::SeqCst) + 1;
-                if count >= self.config.success_threshold {
-                    self.state
-                        .store(CircuitState::Closed as u8, Ordering::SeqCst);
-                    self.failure_count.store(0, Ordering::SeqCst);
+                inner.success_count += 1;
+                if inner.success_count >= self.config.success_threshold {
+                    inner.state = CircuitState::Closed;
+                    inner.failure_count = 0;
                     tracing::info!("Circuit breaker closed");
                 }
             }
@@ -201,22 +202,19 @@ impl CircuitBreaker {
 
     /// Record a failed request.
     pub fn record_failure(&self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
-        self.last_failure_time.store(now, Ordering::SeqCst);
+        let mut inner = self.inner.lock().unwrap();
+        inner.last_failure_time = Some(Instant::now());
 
-        match self.state() {
+        match inner.state {
             CircuitState::Closed => {
-                let count = self.failure_count.fetch_add(1, Ordering::SeqCst) + 1;
-                if count >= self.config.failure_threshold {
-                    self.state.store(CircuitState::Open as u8, Ordering::SeqCst);
-                    tracing::warn!("Circuit breaker opened after {} failures", count);
+                inner.failure_count += 1;
+                if inner.failure_count >= self.config.failure_threshold {
+                    inner.state = CircuitState::Open;
+                    tracing::warn!("Circuit breaker opened after {} failures", inner.failure_count);
                 }
             }
             CircuitState::HalfOpen => {
-                self.state.store(CircuitState::Open as u8, Ordering::SeqCst);
+                inner.state = CircuitState::Open;
                 tracing::warn!("Circuit breaker re-opened");
             }
             CircuitState::Open => {}
