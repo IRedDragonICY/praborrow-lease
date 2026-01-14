@@ -854,12 +854,10 @@ impl ControlPlane for RaftControlPlane {
         // Mock deadlock for demonstration in Phase 3
         // Eventually hook into praborrow-core's Sovereign graph
         let deadlocks = vec![
-            //"Cycle detected: ResA -> ResB -> ResA".to_string() 
-        ]; 
-        
-        Ok(Response::new(proto::DeadlockResponse {
-            deadlocks,
-        }))
+            //"Cycle detected: ResA -> ResB -> ResA".to_string()
+        ];
+
+        Ok(Response::new(proto::DeadlockResponse { deadlocks }))
     }
 }
 

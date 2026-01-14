@@ -562,7 +562,6 @@ pub mod udp {
             let packet = Packet::VoteRequest { term, candidate_id };
             let serialized = serde_json::to_vec(&packet).map_err(|e| e.to_string())?;
 
-
             let peers = self.peers.read().await;
             let mut last_error = None;
             let mut success_count = 0;
@@ -576,10 +575,13 @@ pub mod udp {
                     }
                 }
             }
-            
+
             if success_count == 0 && !peers.is_empty() {
                 if let Some(e) = last_error {
-                    return Err(format!("Failed to broadcast vote request to any peer: {}", e));
+                    return Err(format!(
+                        "Failed to broadcast vote request to any peer: {}",
+                        e
+                    ));
                 }
             }
             Ok(())
@@ -597,15 +599,15 @@ pub mod udp {
                 match self.socket.send_to(&serialized, peer).await {
                     Ok(_) => success_count += 1,
                     Err(e) => {
-                         // Heartbeat failures are common, debug log only
+                        // Heartbeat failures are common, debug log only
                         tracing::debug!("Failed to heartbeat {}: {}", peer, e);
                         last_error = Some(e);
                     }
                 }
             }
-             if success_count == 0 && !peers.is_empty() {
+            if success_count == 0 && !peers.is_empty() {
                 if let Some(e) = last_error {
-                     return Err(format!("Failed to send heartbeats to any peer: {}", e));
+                    return Err(format!("Failed to send heartbeats to any peer: {}", e));
                 }
             }
             Ok(())

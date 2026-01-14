@@ -160,7 +160,11 @@ impl<T> LogEntry<T> {
     }
 
     /// Creates a new configuration entry.
-    pub fn config(index: LogIndex, term: Term, config: ClusterConfig) -> Result<Self, ConsensusError> {
+    pub fn config(
+        index: LogIndex,
+        term: Term,
+        config: ClusterConfig,
+    ) -> Result<Self, ConsensusError> {
         if index == 0 {
             return Err(ConsensusError::IntegrityError(
                 "Log entry index must be greater than 0".into(),
@@ -1502,10 +1506,10 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
         // Check if we can grant vote
         if voted_for.is_none() || voted_for == Some(candidate_id) {
             let log_info = self.storage.get_last_log_info().await.unwrap_or_default();
-            
+
             // Raft §5.4.1: Election Restriction
             if !self.is_log_up_to_date(last_log_index, last_log_term, &log_info) {
-                 tracing::debug!(
+                tracing::debug!(
                     node_id = self.id,
                     term = term,
                     candidate_id = candidate_id,

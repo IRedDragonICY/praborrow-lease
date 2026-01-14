@@ -318,7 +318,8 @@ mod tests {
                     key: "a".to_string(),
                     value: b"1".to_vec(),
                 },
-            ).unwrap(),
+            )
+            .unwrap(),
             LogEntry::new(
                 2,
                 1,
@@ -326,7 +327,8 @@ mod tests {
                     key: "b".to_string(),
                     value: b"2".to_vec(),
                 },
-            ).unwrap(),
+            )
+            .unwrap(),
         ];
         storage.append_entries(&entries).await.unwrap();
 
