@@ -45,15 +45,15 @@ async fn test_vote_handling() {
     let storage: Box<dyn RaftStorage<String>> = Box::new(InMemoryStorage::new());
     let mut node = RaftNode::<String>::new(1, Box::new(MockNetwork), storage, Default::default());
 
-    // Receive vote request from 2 for term 1
-    let granted = node.handle_request_vote(1, 2).await;
+    // Receive vote request from 2 for term 1 (log info: index 0, term 0)
+    let granted = node.handle_request_vote(1, 2, 0, 0).await;
 
     assert!(granted);
     assert_eq!(node.storage.get_vote().await.unwrap(), Some(2));
     assert_eq!(node.storage.get_term().await.unwrap(), 1);
 
     // Deny vote for same term from 3
-    let granted_again = node.handle_request_vote(1, 3).await;
+    let granted_again = node.handle_request_vote(1, 3, 0, 0).await;
     assert!(!granted_again);
 }
 

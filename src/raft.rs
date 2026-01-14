@@ -146,30 +146,45 @@ pub struct LogEntry<T> {
 
 impl<T> LogEntry<T> {
     /// Creates a new data entry.
-    pub fn new(index: LogIndex, term: Term, command: T) -> Self {
-        Self {
+    pub fn new(index: LogIndex, term: Term, command: T) -> Result<Self, ConsensusError> {
+        if index == 0 {
+            return Err(ConsensusError::IntegrityError(
+                "Log entry index must be greater than 0".into(),
+            ));
+        }
+        Ok(Self {
             index,
             term,
             command: LogCommand::App(command),
-        }
+        })
     }
 
     /// Creates a new configuration entry.
-    pub fn config(index: LogIndex, term: Term, config: ClusterConfig) -> Self {
-        Self {
+    pub fn config(index: LogIndex, term: Term, config: ClusterConfig) -> Result<Self, ConsensusError> {
+        if index == 0 {
+            return Err(ConsensusError::IntegrityError(
+                "Log entry index must be greater than 0".into(),
+            ));
+        }
+        Ok(Self {
             index,
             term,
             command: LogCommand::Config(config),
-        }
+        })
     }
 
     /// Creates a new NoOp entry.
-    pub fn noop(index: LogIndex, term: Term) -> Self {
-        Self {
+    pub fn noop(index: LogIndex, term: Term) -> Result<Self, ConsensusError> {
+        if index == 0 {
+            return Err(ConsensusError::IntegrityError(
+                "Log entry index must be greater than 0".into(),
+            ));
+        }
+        Ok(Self {
             index,
             term,
             command: LogCommand::NoOp,
-        }
+        })
     }
 }
 
@@ -1439,7 +1454,13 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
     }
 
     /// Handle RequestVote RPC.
-    pub async fn handle_request_vote(&mut self, term: Term, candidate_id: NodeId) -> bool {
+    pub async fn handle_request_vote(
+        &mut self,
+        term: Term,
+        candidate_id: NodeId,
+        last_log_index: LogIndex,
+        last_log_term: Term,
+    ) -> bool {
         let current_term = self.storage.get_term().await.unwrap_or(0);
         let _voted_for = self.storage.get_vote().await.unwrap_or(None);
 
@@ -1480,8 +1501,22 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
 
         // Check if we can grant vote
         if voted_for.is_none() || voted_for == Some(candidate_id) {
-            // TODO: Also check log up-to-date (§5.4.1)
             let log_info = self.storage.get_last_log_info().await.unwrap_or_default();
+            
+            // Raft §5.4.1: Election Restriction
+            if !self.is_log_up_to_date(last_log_index, last_log_term, &log_info) {
+                 tracing::debug!(
+                    node_id = self.id,
+                    term = term,
+                    candidate_id = candidate_id,
+                    our_last_index = log_info.last_index,
+                    our_last_term = log_info.last_term,
+                    candidate_last_index = last_log_index,
+                    candidate_last_term = last_log_term,
+                    "Rejecting vote: candidate log not up-to-date"
+                );
+                return false;
+            }
 
             tracing::debug!(
                 node_id = self.id,
@@ -1502,6 +1537,25 @@ impl<T: Clone + Send + Sync + Serialize + serde::de::DeserializeOwned + 'static>
             already_voted_for = ?voted_for,
             "Rejecting vote request (already voted)"
         );
+        false
+    }
+
+    /// Checks if candidate's log is at least as up-to-date as ours (§5.4.1)
+    fn is_log_up_to_date(
+        &self,
+        last_log_index: LogIndex,
+        last_log_term: Term,
+        our_log: &LogInfo,
+    ) -> bool {
+        // Candidate's log is more up-to-date if:
+        // 1. Its last term is greater, OR
+        // 2. Same term but longer log
+        if last_log_term > our_log.last_term {
+            return true;
+        }
+        if last_log_term == our_log.last_term && last_log_index >= our_log.last_index {
+            return true;
+        }
         false
     }
 
@@ -1712,7 +1766,7 @@ mod tests {
         storage.set_vote(Some(42)).await.unwrap();
         assert_eq!(storage.get_vote().await.unwrap(), Some(42));
 
-        let entry = LogEntry::new(1, 1, "test".to_string());
+        let entry = LogEntry::new(1, 1, "test".to_string()).unwrap();
         storage.append_entries(&[entry]).await.unwrap();
         assert_eq!(storage.get_log().await.unwrap().count(), 1);
     }
@@ -1723,7 +1777,7 @@ mod tests {
 
         // Append multiple entries
         let entries: Vec<LogEntry<String>> = (1..=5)
-            .map(|i| LogEntry::new(i, 1, format!("cmd{}", i)))
+            .map(|i| LogEntry::new(i, 1, format!("cmd{}", i)).unwrap())
             .collect();
         storage.append_entries(&entries).await.unwrap();
 
@@ -1767,7 +1821,7 @@ mod tests {
 
         // Add log entries
         let entries: Vec<LogEntry<String>> = (1..=10)
-            .map(|i| LogEntry::new(i, 1, format!("cmd{}", i)))
+            .map(|i| LogEntry::new(i, 1, format!("cmd{}", i)).unwrap())
             .collect();
         storage.append_entries(&entries).await.unwrap();
 
@@ -1803,7 +1857,7 @@ mod tests {
             storage.set_term(10).await.unwrap();
             storage.set_vote(Some(1)).await.unwrap();
 
-            let entry = LogEntry::new(1, 1, "test_persist".to_string());
+            let entry = LogEntry::new(1, 1, "test_persist".to_string()).unwrap();
             storage.append_entries(&[entry]).await.unwrap();
         }
 
@@ -1878,7 +1932,7 @@ mod tests {
 
         // Add entries
         let entries: Vec<LogEntry<String>> = (1..=5)
-            .map(|i| LogEntry::new(i, 1, format!("cmd{}", i)))
+            .map(|i| LogEntry::new(i, 1, format!("cmd{}", i)).unwrap())
             .collect();
         storage.append_entries(&entries).await.unwrap();
 
@@ -1918,7 +1972,7 @@ mod tests {
 
             // Add log entries
             let entries: Vec<LogEntry<String>> = (1..=10)
-                .map(|i| LogEntry::new(i, 1, format!("cmd{}", i)))
+                .map(|i| LogEntry::new(i, 1, format!("cmd{}", i)).unwrap())
                 .collect();
             storage.append_entries(&entries).await.unwrap();
 

@@ -75,7 +75,7 @@ impl<'a, T> LeaseManager<'a, T> {
 
         // In a real system, we'd verify signatures/messages here.
         // For now, we trust the Lease object proves it was held.
-        unsafe { praborrow_core::RepatriationToken::new() }
+        unsafe { praborrow_core::RepatriationToken::new(lease.holder) }
     }
 }
 

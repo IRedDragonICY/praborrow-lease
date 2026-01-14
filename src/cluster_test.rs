@@ -200,9 +200,9 @@ mod tests {
 
         // Leader appends entries
         let entries = vec![
-            LogEntry::new(1, 1, "cmd1".to_string()),
-            LogEntry::new(2, 1, "cmd2".to_string()),
-            LogEntry::new(3, 1, "cmd3".to_string()),
+            LogEntry::new(1, 1, "cmd1".to_string()).unwrap(),
+            LogEntry::new(2, 1, "cmd2".to_string()).unwrap(),
+            LogEntry::new(3, 1, "cmd3".to_string()).unwrap(),
         ];
         leader_storage.append_entries(&entries).await.unwrap();
 
@@ -243,8 +243,8 @@ mod tests {
 
         // Append entries
         let entries = vec![
-            LogEntry::new(1, 1, "cmd1".to_string()),
-            LogEntry::new(2, 1, "cmd2".to_string()),
+            LogEntry::new(1, 1, "cmd1".to_string()).unwrap(),
+            LogEntry::new(2, 1, "cmd2".to_string()).unwrap(),
         ];
         storage.append_entries(&entries).await.unwrap();
 
@@ -272,16 +272,16 @@ mod tests {
 
         // Follower has conflicting entries
         let old_entries = vec![
-            LogEntry::new(1, 1, "old1".to_string()),
-            LogEntry::new(2, 1, "old2".to_string()),
-            LogEntry::new(3, 2, "conflict".to_string()),
+            LogEntry::new(1, 1, "old1".to_string()).unwrap(),
+            LogEntry::new(2, 1, "old2".to_string()).unwrap(),
+            LogEntry::new(3, 2, "conflict".to_string()).unwrap(),
         ];
         storage.append_entries(&old_entries).await.unwrap();
 
         // Leader sends entries with different term at index 3
         let new_entries = vec![
-            LogEntry::new(3, 3, "new3".to_string()),
-            LogEntry::new(4, 3, "new4".to_string()),
+            LogEntry::new(3, 3, "new3".to_string()).unwrap(),
+            LogEntry::new(4, 3, "new4".to_string()).unwrap(),
         ];
 
         // Check for conflict at index 3
@@ -318,7 +318,7 @@ mod tests {
                     key: "a".to_string(),
                     value: b"1".to_vec(),
                 },
-            ),
+            ).unwrap(),
             LogEntry::new(
                 2,
                 1,
@@ -326,7 +326,7 @@ mod tests {
                     key: "b".to_string(),
                     value: b"2".to_vec(),
                 },
-            ),
+            ).unwrap(),
         ];
         storage.append_entries(&entries).await.unwrap();
 

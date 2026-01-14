@@ -479,6 +479,7 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
                 let pool = pool.clone();
                 let address = address.clone();
 
+                let request = request.clone();
                 Box::pin(async move {
                     let mut client = pool.get_connection(peer_id, &address).await?;
                     let response = client
@@ -551,6 +552,8 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
                 let address = address.clone();
                 let request = request.clone();
 
+                let request = request.clone();
+
                 Box::pin(async move {
                     let mut client = pool.get_connection(peer_id, &address).await?;
                     let response = client
@@ -607,6 +610,8 @@ impl<T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + '
             .send_with_retry(peer_id, || {
                 let pool = pool.clone();
                 let address = address.clone();
+                let request = request.clone();
+
                 let request = request.clone();
 
                 Box::pin(async move {
@@ -839,6 +844,21 @@ impl ControlPlane for RaftControlPlane {
 
         Ok(Response::new(proto::LogResponse {
             logs: logs.into_iter().take(limit).collect(),
+        }))
+    }
+
+    async fn get_deadlocks(
+        &self,
+        _request: Request<proto::Empty>,
+    ) -> Result<Response<proto::DeadlockResponse>, Status> {
+        // Mock deadlock for demonstration in Phase 3
+        // Eventually hook into praborrow-core's Sovereign graph
+        let deadlocks = vec![
+            //"Cycle detected: ResA -> ResB -> ResA".to_string() 
+        ]; 
+        
+        Ok(Response::new(proto::DeadlockResponse {
+            deadlocks,
         }))
     }
 }

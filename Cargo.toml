@@ -41,14 +41,14 @@ tokio = { workspace = true }
 futures = { workspace = true }
 
 [build-dependencies]
-tonic-build = { version = "0.13", optional = true }
+tonic-build = { version = "0.9.2", optional = true }
 protoc-bin-vendored = { version = "3.0", optional = true }
 
 [features]
 default = ["std"]
 std = ["tokio"]
 net = ["std"]
-tokio = ["dep:tokio"]
+tokio = ["dep:tokio", "tokio?/fs"]
 grpc = ["std", "tonic", "prost", "tonic-build", "protoc-bin-vendored"]
 tls = ["grpc", "rustls", "tokio-rustls"]
 observability = ["prometheus"]

@@ -21,7 +21,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 /// Raft timing configuration
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct RaftConfig {
     /// Minimum election timeout (randomized between min and max)
     #[serde(
@@ -1186,7 +1186,7 @@ where
         let log_info = self.storage.get_last_log_info().await?;
         let next_idx = log_info.last_index + 1;
 
-        let entry = LogEntry::config(next_idx, term, final_config.clone());
+        let entry = LogEntry::config(next_idx, term, final_config.clone())?;
         self.storage.append_entries(&[entry]).await?;
 
         // Update active config immediately
@@ -1222,7 +1222,7 @@ where
         let log_info = self.storage.get_last_log_info().await?;
         let new_index = log_info.last_index + 1;
 
-        let entry = LogEntry::new(new_index, term, value);
+        let entry = LogEntry::new(new_index, term, value)?;
 
         self.storage.append_entries(&[entry]).await?;
 
@@ -1270,7 +1270,7 @@ where
         let log_info = self.storage.get_last_log_info().await?;
         let next_idx = log_info.last_index + 1;
 
-        let entry = LogEntry::config(next_idx, term, joint_config.clone());
+        let entry = LogEntry::config(next_idx, term, joint_config.clone())?;
         self.storage.append_entries(&[entry]).await?;
 
         // Update active config immediately

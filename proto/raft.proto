@@ -76,6 +76,12 @@ service ControlPlane {
     rpc GetNodeStatus(Empty) returns (NodeStatus);
     // Returns recent log entries (for TUI/Dashboard)
     rpc GetRecentLogs(LogRequest) returns (LogResponse);
+    // Returns detected deadlocks
+    rpc GetDeadlocks(Empty) returns (DeadlockResponse);
+}
+
+message DeadlockResponse {
+    repeated string deadlocks = 1;
 }
 
 message Empty {}
